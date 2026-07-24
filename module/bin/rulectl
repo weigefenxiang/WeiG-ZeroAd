@@ -497,8 +497,11 @@ status_json() {
   command -v magisk >/dev/null 2>&1 && root_impl=magisk
   command -v ksud >/dev/null 2>&1 && root_impl=kernelsu
   command -v apd >/dev/null 2>&1 && root_impl=apatch
-  printf '{"schema":3,"pending_reboot":%s,"protection_enabled":%s,"healthy":%s,"root_impl":"%s","cn_profile":"%s","global_profile":"%s","rule_version":%s,"rules_downloaded":%s,"compiled_rules":%s,"running_rules":%s,"disabled_rules":%s,"user_block_rules":%s,"user_allow_rules":%s,"reward_block_rules":%s,"reward_temporarily_allowed":%s,"reward_expires_at":%s,"enabled_packs":"%s"}\n' \
-    "$pending_reboot" "$protection" "$healthy" "$root_impl" "$cn_profile" "$global_profile" "$version" "$rules_downloaded" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
+  core_version=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+-')
+  core_version_code=$(sed -n 's/^versionCode=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1)
+  case "$core_version_code" in ''|*[!0-9]*) core_version_code=0 ;; esac
+  printf '{"schema":3,"pending_reboot":%s,"protection_enabled":%s,"healthy":%s,"root_impl":"%s","core_version":"%s","core_version_code":%s,"cn_profile":"%s","global_profile":"%s","rule_version":%s,"rules_downloaded":%s,"compiled_rules":%s,"running_rules":%s,"disabled_rules":%s,"user_block_rules":%s,"user_allow_rules":%s,"reward_block_rules":%s,"reward_temporarily_allowed":%s,"reward_expires_at":%s,"enabled_packs":"%s"}\n' \
+    "$pending_reboot" "$protection" "$healthy" "$root_impl" "$core_version" "$core_version_code" "$cn_profile" "$global_profile" "$version" "$rules_downloaded" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
 }
 
 ensure_state

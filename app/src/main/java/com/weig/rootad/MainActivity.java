@@ -35,6 +35,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
+    private record UpdateCheck(
+            RuleUpdater.Available rules,
+            CodeUpdater.Available code,
+            String rulesError,
+            String codeError
+    ) {}
+
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean zh;
@@ -43,9 +50,9 @@ public final class MainActivity extends Activity {
     private TextView actionText, rewardCountdown;
     private ProgressBar progress, actionProgress;
     private Button protectionButton, rewardButton;
-    private Button cnLeanButton, cnBalancedButton, cnStrictButton;
+    private Button cnOffButton, cnLeanButton, cnBalancedButton, cnStrictButton;
     private Button globalOffButton, globalLeanButton, globalBalancedButton, globalStrictButton;
-    private CheckBox cnEnabled, rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
+    private CheckBox rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
     private RootStatus latest;
     private boolean updatingUi;
     private final Runnable countdownTick = new Runnable() {
@@ -136,27 +143,21 @@ public final class MainActivity extends Activity {
         LinearLayout profiles = card();
         profiles.addView(text(t("境内和境外分别选择强度；六个普通配置均不含奖励广告域名。", "Choose domestic and global strength separately. All normal profiles exclude reward-ad domains."),
                 14, secondary, Typeface.NORMAL));
-        cnEnabled = new CheckBox(this);
-        cnEnabled.setText(t("启用境内规则", "Enable domestic rules"));
-        cnEnabled.setTextSize(14);
-        cnEnabled.setTextColor(primary);
-        cnEnabled.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        cnEnabled.setMinHeight(dp(44));
-        cnEnabled.setOnCheckedChangeListener((button, checked) -> {
-            if (!updatingUi) command(
-                    checked ? "cn-profile on" : "cn-profile off",
-                    checked ? t("正在开启境内规则…", "Enabling domestic rules…") :
-                            t("正在关闭境内规则…", "Disabling domestic rules…"));
-        });
-        profiles.addView(cnEnabled, margins(0, 10, 0, 0));
-        LinearLayout cnButtons = row();
+        profiles.addView(text(t("境内规则", "Domestic rules"), 14, primary, Typeface.BOLD),
+                margins(0, 16, 0, 0));
+        LinearLayout cnTop = row();
+        cnOffButton = actionButton(t("关闭", "Off"), v -> command(
+                "cn-profile off", t("正在关闭境内规则…", "Disabling domestic rules…")));
         cnLeanButton = actionButton(t("精简", "Lean"), v -> command("cn-profile lean", t("正在切换境内精简…", "Selecting domestic Lean…")));
+        cnTop.addView(cnOffButton, weightMargins(1, 0, 10, 5, 0));
+        cnTop.addView(cnLeanButton, weightMargins(1, 0, 10, 0, 0));
+        profiles.addView(cnTop);
+        LinearLayout cnBottom = row();
         cnBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("cn-profile balanced", t("正在切换境内平衡…", "Selecting domestic Balanced…")));
         cnStrictButton = actionButton(t("严格", "Strict"), v -> command("cn-profile strict", t("正在切换境内严格…", "Selecting domestic Strict…")));
-        cnButtons.addView(cnLeanButton, weightMargins(1, 0, 10, 5, 0));
-        cnButtons.addView(cnBalancedButton, weightMargins(1, 0, 10, 5, 0));
-        cnButtons.addView(cnStrictButton, weightMargins(1, 0, 10, 0, 0));
-        profiles.addView(cnButtons);
+        cnBottom.addView(cnBalancedButton, weightMargins(1, 0, 8, 5, 0));
+        cnBottom.addView(cnStrictButton, weightMargins(1, 0, 8, 0, 0));
+        profiles.addView(cnBottom);
         profiles.addView(text(t("境外规则", "Global rules"), 14, primary, Typeface.BOLD), margins(0, 16, 0, 0));
         LinearLayout globalTop = row();
         globalOffButton = actionButton(t("关闭", "Off"), v -> command("global-profile off", t("正在关闭境外规则…", "Disabling global rules…")));
@@ -210,13 +211,9 @@ public final class MainActivity extends Activity {
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setIndeterminate(true); progress.setVisibility(View.GONE);
         updates.addView(progress, margins(0, 12, 0, 4));
-        Button rules = button(t("检查规则更新", "Check for rule updates"), true);
-        rules.setOnClickListener(v -> updateRules());
-        updates.addView(rules, margins(0, 10, 0, 0));
-        LinearLayout updateButtons = row();
-        updateButtons.addView(actionButton(t("更新管理器", "Update app"), v -> updateApp()), weightMargins(1, 0, 10, 6, 0));
-        updateButtons.addView(actionButton(t("更新核心", "Update core"), v -> updateCore()), weightMargins(1, 0, 10, 0, 0));
-        updates.addView(updateButtons);
+        Button checkUpdates = button(t("检查更新", "Check for updates"), true);
+        checkUpdates.setOnClickListener(v -> checkUpdates());
+        updates.addView(checkUpdates, margins(0, 10, 0, 0));
         Button rollback = button(t("回滚上一版规则", "Roll back rules"), false);
         rollback.setOnClickListener(v -> command("rules-rollback"));
         updates.addView(rollback, margins(0, 10, 0, 0));
@@ -288,13 +285,11 @@ public final class MainActivity extends Activity {
         protectionButton.setText(status.protection() ? t("关闭保护", "Disable protection") : t("开启保护", "Enable protection"));
         styleProfileButtons(status.cnProfile(), status.globalProfile());
         updatingUi = true;
-        cnEnabled.setChecked(!cnOff);
         rewardTencent.setChecked(status.packEnabled("reward.tencent"));
         rewardWechat.setChecked(status.packEnabled("reward.wechat"));
         rewardShortVideo.setChecked(status.packEnabled("reward.short-video"));
         rewardOther.setChecked(status.packEnabled("reward.other"));
         updatingUi = false;
-        setDomesticProfileButtonsEnabled(!cnOff);
         if (status.rewardTemporarilyAllowed()) {
             rewardCountdown.setVisibility(View.VISIBLE);
             rewardButton.setText(t("立即结束临时放行", "End temporary allowance"));
@@ -385,41 +380,96 @@ public final class MainActivity extends Activity {
                 }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
-    private void updateRules() {
-        busy(true, t("正在检查规则更新…", "Checking for rule updates…"));
-        long currentVersion = latest == null ? 0 : latest.ruleVersion();
-        boolean rulesDownloaded = latest != null && latest.rulesDownloaded();
+    private void checkUpdates() {
+        busy(true, t("正在检查规则、管理器和核心…", "Checking rules, manager, and core…"));
         worker.execute(() -> {
-            try {
-                RuleUpdater.Available available = RuleUpdater.checkLatest();
-                main.post(() -> showRuleUpdate(available, currentVersion, rulesDownloaded));
-            } catch (Exception error) { main.post(() -> rulesUpdateFailed(error)); }
+            UpdateCheck result = performUpdateCheck();
+            main.post(() -> showUpdateCheck(result));
         });
     }
 
-    private void showRuleUpdate(
-            RuleUpdater.Available available, long currentVersion, boolean rulesDownloaded) {
+    private UpdateCheck performUpdateCheck() {
+        RuleUpdater.Available rules = null;
+        CodeUpdater.Available code = null;
+        String rulesError = "";
+        String codeError = "";
+        try { rules = RuleUpdater.checkLatest(); }
+        catch (Exception error) { rulesError = errorMessage(error); }
+        try { code = CodeUpdater.check(this); }
+        catch (Exception error) { codeError = errorMessage(error); }
+        return new UpdateCheck(rules, code, rulesError, codeError);
+    }
+
+    private void showUpdateCheck(UpdateCheck result) {
         busy(false, null);
-        if (rulesDownloaded && available.version() <= currentVersion) {
-            toast(t("当前已是最新规则", "Rules are already up to date"));
-            return;
-        }
-        String message = t("当前版本：", "Current version: ") +
-                (rulesDownloaded ? formatRuleVersion(currentVersion) :
-                        t("内置基础规则", "Built-in base")) + "\n" +
-                t("最新版本：", "Latest version: ") +
-                formatRuleVersion(available.version()) + "\n" +
-                t("下载大小：", "Download size: ") + formatBytes(available.asset().size()) +
-                "\n\n" + t(
-                "更新规则不需要重启，自定义拦截、放行和关闭列表不会被覆盖。",
-                "No reboot is needed. Custom block, allow, and disabled lists are preserved.");
-        new AlertDialog.Builder(this)
-                .setTitle(t("发现新的规则版本", "Rule update available"))
+        RootStatus status = latest;
+        long currentRules = status == null ? 0 : status.ruleVersion();
+        boolean downloaded = status != null && status.rulesDownloaded();
+        boolean rulesNew = result.rules() != null &&
+                (!downloaded || result.rules().version() > currentRules);
+        boolean managerNew = result.code() != null &&
+                result.code().manager().versionCode() > BuildConfig.VERSION_CODE;
+        boolean corePending = status != null && status.pendingReboot();
+        int currentCoreCode = status == null ? 0 : status.coreVersionCode();
+        boolean coreNew = result.code() != null && !corePending &&
+                result.code().core().versionCode() > currentCoreCode;
+
+        String rulesCurrent = downloaded ? formatRuleVersion(currentRules) :
+                t("内置基础规则", "Built-in base");
+        String rulesLine = result.rules() == null
+                ? t("规则：检查失败 · ", "Rules: check failed · ") + result.rulesError()
+                : t("规则：", "Rules: ") + rulesCurrent + " → " +
+                formatRuleVersion(result.rules().version()) +
+                (rulesNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date"));
+        String managerLine = result.code() == null
+                ? t("管理器：检查失败 · ", "Manager: check failed · ") + result.codeError()
+                : t("管理器：", "Manager: ") +
+                formatCodeVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE) + " → " +
+                formatCodeVersion(result.code().manager().versionName(),
+                        result.code().manager().versionCode()) +
+                (managerNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date"));
+        String coreCurrent = status == null || !status.installed()
+                ? t("未安装", "not installed")
+                : formatCodeVersion(status.coreVersion(), status.coreVersionCode());
+        String coreLine = result.code() == null
+                ? t("核心：检查失败 · ", "Core: check failed · ") + result.codeError()
+                : t("核心：", "Core: ") + coreCurrent + " → " +
+                formatCodeVersion(result.code().core().versionName(),
+                        result.code().core().versionCode()) +
+                (corePending ? t(" · 等待重启", " · reboot pending") :
+                        (coreNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date")));
+        String message = rulesLine + "\n\n" + managerLine + "\n\n" + coreLine + "\n\n" +
+                t("规则立即生效；管理器安装后重新打开；核心重启后生效。",
+                        "Rules apply immediately; reopen the manager after installation; core updates apply after reboot.");
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(t("检查更新", "Check for updates"))
                 .setMessage(message)
-                .setPositiveButton(t("更新", "Update"),
-                        (dialog, which) -> installRules(available))
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .setPositiveButton(t("更新规则", "Update rules"), null)
+                .setNeutralButton(t("更新管理器", "Update manager"), null)
+                .setNegativeButton(t("更新核心", "Update core"), null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            Button rulesButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            Button managerButton = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+            Button coreButton = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+            rulesButton.setEnabled(rulesNew);
+            managerButton.setEnabled(managerNew);
+            coreButton.setEnabled(coreNew);
+            if (rulesNew) rulesButton.setOnClickListener(view -> {
+                dialog.dismiss();
+                installRules(result.rules());
+            });
+            if (managerNew) managerButton.setOnClickListener(view -> {
+                dialog.dismiss();
+                updateApp(result.code().manager());
+            });
+            if (coreNew) coreButton.setOnClickListener(view -> {
+                dialog.dismiss();
+                updateCore(result.code().core());
+            });
+        });
+        dialog.show();
     }
 
     private void installRules(RuleUpdater.Available available) {
@@ -438,15 +488,11 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void updateApp() {
-        busy(true, t("正在检查管理器更新…", "Checking manager update…"));
+    private void updateApp(CodeUpdater.Component manager) {
+        busy(true, t("正在下载并验证管理器…", "Downloading and verifying manager…"));
         worker.execute(() -> {
             try {
-                ReleaseClient.Release release = ReleaseClient.latestWithAsset(
-                        BuildConfig.CODE_REPOSITORY, "zeroad-manager", ".apk");
-                ReleaseClient.Asset apk = release.endingWith(".apk");
-                if (apk == null) throw new IllegalStateException("Release has no APK asset");
-                File file = ReleaseClient.download(this, apk, 80L * 1024 * 1024);
+                File file = CodeUpdater.download(this, manager, 80L * 1024 * 1024);
                 main.post(() -> {
                     busy(false, null);
                     try { ApkInstaller.install(this, file, (message, ok) -> main.post(() -> toast(message))); }
@@ -456,19 +502,11 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void updateCore() {
+    private void updateCore(CodeUpdater.Component core) {
         busy(true, t("正在下载并验证核心…", "Downloading and verifying core…"));
         worker.execute(() -> {
             try {
-                ReleaseClient.Release release = ReleaseClient.latestWithAsset(
-                        BuildConfig.CODE_REPOSITORY, "core-only", ".zip");
-                ReleaseClient.Asset zip = null;
-                for (ReleaseClient.Asset candidate : release.assets()) {
-                    String name = candidate.name().toLowerCase(Locale.ROOT);
-                    if (name.contains("core-only") && name.endsWith(".zip")) { zip = candidate; break; }
-                }
-                if (zip == null) throw new IllegalStateException("Release has no core ZIP asset");
-                File file = ReleaseClient.download(this, zip, 50L * 1024 * 1024);
+                File file = CodeUpdater.download(this, core, 50L * 1024 * 1024);
                 String path = file.getAbsolutePath();
                 String command = "if command -v magisk >/dev/null 2>&1; then magisk --install-module " + RootShell.quote(path) +
                         "; elif command -v ksud >/dev/null 2>&1; then ksud module install " + RootShell.quote(path) +
@@ -522,6 +560,10 @@ public final class MainActivity extends Activity {
     }
 
     private void failed(Exception error) { busy(false, null); toast(error.getMessage() == null ? error.toString() : error.getMessage()); }
+    private String errorMessage(Exception error) {
+        String value = error.getMessage() == null ? error.toString() : error.getMessage();
+        return value.length() > 96 ? value.substring(0, 96) + "…" : value;
+    }
     private void rulesUpdateFailed(Exception error) {
         busy(false, null);
         String detail = error.getMessage() == null ? error.toString() : error.getMessage();
@@ -538,11 +580,8 @@ public final class MainActivity extends Activity {
         return value.substring(0, 4) + "-" + value.substring(4, 6) + "-" +
                 value.substring(6, 8) + " #" + value.substring(8);
     }
-    private String formatBytes(long bytes) {
-        if (bytes <= 0) return t("未知", "Unknown");
-        if (bytes < 1024 * 1024) return String.format(
-                Locale.US, "%.1f KB", bytes / 1024.0);
-        return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+    private String formatCodeVersion(String name, int code) {
+        return name + " (" + code + ")";
     }
     private void busy(boolean value, String message) {
         progress.setVisibility(value ? View.VISIBLE : View.GONE);
@@ -576,7 +615,7 @@ public final class MainActivity extends Activity {
     }
     private void setRuleControlsEnabled(boolean enabled) {
         if (cnLeanButton == null) return;
-        cnEnabled.setEnabled(enabled);
+        cnOffButton.setEnabled(enabled);
         cnLeanButton.setEnabled(enabled);
         cnBalancedButton.setEnabled(enabled);
         cnStrictButton.setEnabled(enabled);
@@ -589,11 +628,6 @@ public final class MainActivity extends Activity {
         rewardShortVideo.setEnabled(enabled);
         rewardOther.setEnabled(enabled);
         rewardButton.setEnabled(enabled);
-    }
-    private void setDomesticProfileButtonsEnabled(boolean enabled) {
-        cnLeanButton.setEnabled(enabled);
-        cnBalancedButton.setEnabled(enabled);
-        cnStrictButton.setEnabled(enabled);
     }
     private void styleChoice(Button button, boolean selected) {
         button.setTextColor(selected ? Color.WHITE : accent);
@@ -609,6 +643,7 @@ public final class MainActivity extends Activity {
         };
     }
     private void styleProfileButtons(String cn, String global) {
+        styleChoice(cnOffButton, cn.equals("off"));
         styleChoice(cnLeanButton, cn.equals("lean"));
         styleChoice(cnBalancedButton, cn.equals("balanced"));
         styleChoice(cnStrictButton, cn.equals("strict"));

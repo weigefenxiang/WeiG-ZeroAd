@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream;
 
 final class RuleUpdater {
     record Result(long version, String statusJson) {}
-    record Available(long version, String page, ReleaseClient.Asset asset) {}
+    record Available(long version, ReleaseClient.Asset asset) {}
 
     private static final Pattern RULE_TAG = Pattern.compile("rules-([0-9]{10})");
 
@@ -62,7 +62,7 @@ final class RuleUpdater {
         if (version < 1) throw new SecurityException("Invalid rule version");
         ReleaseClient.Asset asset = release.matching("zeroad-rules", ".zip");
         if (asset == null) throw new IllegalStateException("Rules release has no ZIP asset");
-        return new Available(version, release.page(), asset);
+        return new Available(version, asset);
     }
 
     static Result install(Context context, Available available) throws Exception {

@@ -8,6 +8,7 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 MODULE_DIR="$TEMP_DIR/module"
 mkdir -p "$MODULE_DIR/bin" "$MODULE_DIR/rules" "$TEMP_DIR/data" "$TEMP_DIR/system"
 cp "$ROOT/module/bin/rulectl" "$MODULE_DIR/bin/rulectl"
+cp "$ROOT/module/module.prop" "$MODULE_DIR/module.prop"
 cp "$ROOT/rules/generated/balanced.domains" "$MODULE_DIR/rules/cn-lean.domains"
 cp "$ROOT/rules/generated/balanced.domains" "$MODULE_DIR/rules/cn-balanced.domains"
 cp "$ROOT/rules/generated/strict.domains" "$MODULE_DIR/rules/cn-strict.domains"
@@ -37,6 +38,8 @@ status=$(bash "$RULECTL" status)
 echo "$status" | grep -q '"protection_enabled":true'
 echo "$status" | grep -q '"pending_reboot":false'
 echo "$status" | grep -q '"healthy":true'
+echo "$status" | grep -q '"core_version":"0.1.0"'
+echo "$status" | grep -q '"core_version_code":2'
 echo "$status" | grep -q '"cn_profile":"lean"'
 echo "$status" | grep -q '"global_profile":"off"'
 echo "$status" | grep -q '"rules_downloaded":false'

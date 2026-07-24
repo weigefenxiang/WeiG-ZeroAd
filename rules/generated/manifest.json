@@ -74,6 +74,8 @@
   "reward_default_enabled": true,
   "status_fields": [
     "pending_reboot",
+    "core_version",
+    "core_version_code",
     "rules_downloaded",
     "compiled_rules",
     "running_rules",
