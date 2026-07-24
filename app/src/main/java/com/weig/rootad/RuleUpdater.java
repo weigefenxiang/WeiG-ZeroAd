@@ -15,11 +15,16 @@ import java.security.MessageDigest;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 final class RuleUpdater {
     record Result(long version, String statusJson) {}
+    record Available(long version, String page, ReleaseClient.Asset asset) {}
+
+    private static final Pattern RULE_TAG = Pattern.compile("rules-([0-9]{10})");
 
     private static final Set<String> PROFILE_FILES = Set.of(
             "cn-lean.domains", "cn-balanced.domains", "cn-strict.domains",
@@ -48,12 +53,20 @@ final class RuleUpdater {
 
     private RuleUpdater() {}
 
-    static Result installLatest(Context context) throws Exception {
+    static Available checkLatest() throws Exception {
         ReleaseClient.Release release = ReleaseClient.latestWithAsset(
                 BuildConfig.RULES_REPOSITORY, "zeroad-rules", ".zip");
-        ReleaseClient.Asset asset = release.endingWith(".zip");
+        Matcher matcher = RULE_TAG.matcher(release.tag());
+        if (!matcher.matches()) throw new SecurityException("Invalid rules release tag");
+        long version = Long.parseLong(matcher.group(1));
+        if (version < 1) throw new SecurityException("Invalid rule version");
+        ReleaseClient.Asset asset = release.matching("zeroad-rules", ".zip");
         if (asset == null) throw new IllegalStateException("Rules release has no ZIP asset");
-        File archive = ReleaseClient.download(context, asset, 96L * 1024 * 1024);
+        return new Available(version, release.page(), asset);
+    }
+
+    static Result install(Context context, Available available) throws Exception {
+        File archive = ReleaseClient.download(context, available.asset(), 96L * 1024 * 1024);
         File extracted = new File(context.getCacheDir(), "zeroad-rules-staging");
         deleteTree(extracted);
         if (!extracted.mkdir()) throw new IllegalStateException("Cannot create rule staging directory");
@@ -64,7 +77,8 @@ final class RuleUpdater {
                 StandardCharsets.UTF_8));
         if (manifest.getInt("schema") != 3) throw new SecurityException("Unsupported rule schema");
         long version = manifest.getLong("version");
-        if (version < 1) throw new SecurityException("Invalid rule version");
+        if (version != available.version())
+            throw new SecurityException("Release tag and rule manifest version differ");
 
         JSONObject profiles = manifest.getJSONObject("profiles");
         Validated cnLean = validateProfile(extracted, profiles, "cn", "lean");

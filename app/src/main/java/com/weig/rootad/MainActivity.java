@@ -45,7 +45,7 @@ public final class MainActivity extends Activity {
     private Button protectionButton, rewardButton;
     private Button cnLeanButton, cnBalancedButton, cnStrictButton;
     private Button globalOffButton, globalLeanButton, globalBalancedButton, globalStrictButton;
-    private CheckBox rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
+    private CheckBox cnEnabled, rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
     private RootStatus latest;
     private boolean updatingUi;
     private final Runnable countdownTick = new Runnable() {
@@ -136,7 +136,19 @@ public final class MainActivity extends Activity {
         LinearLayout profiles = card();
         profiles.addView(text(t("境内和境外分别选择强度；六个普通配置均不含奖励广告域名。", "Choose domestic and global strength separately. All normal profiles exclude reward-ad domains."),
                 14, secondary, Typeface.NORMAL));
-        profiles.addView(text(t("境内规则", "Domestic rules"), 14, primary, Typeface.BOLD), margins(0, 14, 0, 0));
+        cnEnabled = new CheckBox(this);
+        cnEnabled.setText(t("启用境内规则", "Enable domestic rules"));
+        cnEnabled.setTextSize(14);
+        cnEnabled.setTextColor(primary);
+        cnEnabled.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        cnEnabled.setMinHeight(dp(44));
+        cnEnabled.setOnCheckedChangeListener((button, checked) -> {
+            if (!updatingUi) command(
+                    checked ? "cn-profile on" : "cn-profile off",
+                    checked ? t("正在开启境内规则…", "Enabling domestic rules…") :
+                            t("正在关闭境内规则…", "Disabling domestic rules…"));
+        });
+        profiles.addView(cnEnabled, margins(0, 10, 0, 0));
         LinearLayout cnButtons = row();
         cnLeanButton = actionButton(t("精简", "Lean"), v -> command("cn-profile lean", t("正在切换境内精简…", "Selecting domestic Lean…")));
         cnBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("cn-profile balanced", t("正在切换境内平衡…", "Selecting domestic Balanced…")));
@@ -198,7 +210,7 @@ public final class MainActivity extends Activity {
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setIndeterminate(true); progress.setVisibility(View.GONE);
         updates.addView(progress, margins(0, 12, 0, 4));
-        Button rules = button(t("一键更新规则", "Update rules"), true);
+        Button rules = button(t("检查规则更新", "Check for rule updates"), true);
         rules.setOnClickListener(v -> updateRules());
         updates.addView(rules, margins(0, 10, 0, 0));
         LinearLayout updateButtons = row();
@@ -262,10 +274,12 @@ public final class MainActivity extends Activity {
         protectionButton.setEnabled(true);
         protectionText.setText(status.protection() ? t("保护运行中", "Protection active") : t("保护已关闭", "Protection disabled"));
         countText.setText(String.format(Locale.US, "%,d", status.running()));
-        String cnMode = profileLabel(status.cnProfile());
+        boolean cnOff = status.cnProfile().equals("off");
+        String cnMode = cnOff ? t("境内关闭", "Domestic off") :
+                t("境内", "Domestic ") + profileLabel(status.cnProfile());
         String globalMode = status.globalProfile().equals("off") ? t("境外关闭", "Global off") :
                 t("境外", "Global ") + profileLabel(status.globalProfile());
-        detailText.setText(t("境内", "Domestic ") + cnMode + " · " + globalMode + " · " + status.root() +
+        detailText.setText(cnMode + " · " + globalMode + " · " + status.root() +
                 " · rules " + status.ruleVersion() +
                 "\n" + t("关闭 ", "disabled ") + status.disabled() + " · " +
                 t("自定义拦截 ", "custom block ") + status.customBlock() + " · " +
@@ -274,11 +288,13 @@ public final class MainActivity extends Activity {
         protectionButton.setText(status.protection() ? t("关闭保护", "Disable protection") : t("开启保护", "Enable protection"));
         styleProfileButtons(status.cnProfile(), status.globalProfile());
         updatingUi = true;
+        cnEnabled.setChecked(!cnOff);
         rewardTencent.setChecked(status.packEnabled("reward.tencent"));
         rewardWechat.setChecked(status.packEnabled("reward.wechat"));
         rewardShortVideo.setChecked(status.packEnabled("reward.short-video"));
         rewardOther.setChecked(status.packEnabled("reward.other"));
         updatingUi = false;
+        setDomesticProfileButtonsEnabled(!cnOff);
         if (status.rewardTemporarilyAllowed()) {
             rewardCountdown.setVisibility(View.VISIBLE);
             rewardButton.setText(t("立即结束临时放行", "End temporary allowance"));
@@ -370,12 +386,55 @@ public final class MainActivity extends Activity {
     }
 
     private void updateRules() {
-        busy(true, t("正在检查并验证规则…", "Checking and verifying rules…"));
+        busy(true, t("正在检查规则更新…", "Checking for rule updates…"));
+        long currentVersion = latest == null ? 0 : latest.ruleVersion();
+        boolean rulesDownloaded = latest != null && latest.rulesDownloaded();
         worker.execute(() -> {
             try {
-                RuleUpdater.Result result = RuleUpdater.installLatest(this);
-                main.post(() -> { toast(t("规则已更新：", "Rules updated: ") + result.version()); refresh(); });
+                RuleUpdater.Available available = RuleUpdater.checkLatest();
+                main.post(() -> showRuleUpdate(available, currentVersion, rulesDownloaded));
             } catch (Exception error) { main.post(() -> rulesUpdateFailed(error)); }
+        });
+    }
+
+    private void showRuleUpdate(
+            RuleUpdater.Available available, long currentVersion, boolean rulesDownloaded) {
+        busy(false, null);
+        if (rulesDownloaded && available.version() <= currentVersion) {
+            toast(t("当前已是最新规则", "Rules are already up to date"));
+            return;
+        }
+        String message = t("当前版本：", "Current version: ") +
+                (rulesDownloaded ? formatRuleVersion(currentVersion) :
+                        t("内置基础规则", "Built-in base")) + "\n" +
+                t("最新版本：", "Latest version: ") +
+                formatRuleVersion(available.version()) + "\n" +
+                t("下载大小：", "Download size: ") + formatBytes(available.asset().size()) +
+                "\n\n" + t(
+                "更新规则不需要重启，自定义拦截、放行和关闭列表不会被覆盖。",
+                "No reboot is needed. Custom block, allow, and disabled lists are preserved.");
+        new AlertDialog.Builder(this)
+                .setTitle(t("发现新的规则版本", "Rule update available"))
+                .setMessage(message)
+                .setPositiveButton(t("更新", "Update"),
+                        (dialog, which) -> installRules(available))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void installRules(RuleUpdater.Available available) {
+        busy(true, t("正在下载并验证规则…", "Downloading and verifying rules…"));
+        worker.execute(() -> {
+            try {
+                RuleUpdater.Result result = RuleUpdater.install(this, available);
+                main.post(() -> {
+                    toast(t("规则已更新：", "Rules updated: ") +
+                            formatRuleVersion(result.version()));
+                    refresh();
+                });
+            } catch (Exception error) {
+                main.post(() -> rulesUpdateFailed(error));
+            }
         });
     }
 
@@ -472,6 +531,19 @@ public final class MainActivity extends Activity {
                         "20260723 base. Reason: ") + detail);
         refresh();
     }
+    private String formatRuleVersion(long version) {
+        if (version <= 0) return t("内置基础规则", "Built-in base");
+        String value = Long.toString(version);
+        if (value.length() != 10) return value;
+        return value.substring(0, 4) + "-" + value.substring(4, 6) + "-" +
+                value.substring(6, 8) + " #" + value.substring(8);
+    }
+    private String formatBytes(long bytes) {
+        if (bytes <= 0) return t("未知", "Unknown");
+        if (bytes < 1024 * 1024) return String.format(
+                Locale.US, "%.1f KB", bytes / 1024.0);
+        return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+    }
     private void busy(boolean value, String message) {
         progress.setVisibility(value ? View.VISIBLE : View.GONE);
         actionProgress.setVisibility(value ? View.VISIBLE : View.GONE);
@@ -504,6 +576,7 @@ public final class MainActivity extends Activity {
     }
     private void setRuleControlsEnabled(boolean enabled) {
         if (cnLeanButton == null) return;
+        cnEnabled.setEnabled(enabled);
         cnLeanButton.setEnabled(enabled);
         cnBalancedButton.setEnabled(enabled);
         cnStrictButton.setEnabled(enabled);
@@ -517,6 +590,11 @@ public final class MainActivity extends Activity {
         rewardOther.setEnabled(enabled);
         rewardButton.setEnabled(enabled);
     }
+    private void setDomesticProfileButtonsEnabled(boolean enabled) {
+        cnLeanButton.setEnabled(enabled);
+        cnBalancedButton.setEnabled(enabled);
+        cnStrictButton.setEnabled(enabled);
+    }
     private void styleChoice(Button button, boolean selected) {
         button.setTextColor(selected ? Color.WHITE : accent);
         button.setBackground(round(selected ? accent : accentSoft, 14, selected ? accent : divider));
@@ -526,6 +604,7 @@ public final class MainActivity extends Activity {
             case "lean" -> t("精简", "Lean");
             case "balanced" -> t("平衡", "Balanced");
             case "strict" -> t("严格", "Strict");
+            case "off" -> t("关闭", "Off");
             default -> value;
         };
     }

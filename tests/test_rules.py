@@ -58,6 +58,7 @@ class GeneratedRuleTests(unittest.TestCase):
         manifest = json.loads((ROOT / "rules/generated/manifest.json").read_text(encoding="utf-8"))
         self.assertIn("running_rules", manifest["status_fields"])
         self.assertIn("pending_reboot", manifest["status_fields"])
+        self.assertIn("rules_downloaded", manifest["status_fields"])
         self.assertIn("reward_temporarily_allowed", manifest["status_fields"])
         self.assertTrue(manifest["manual_rule_control"])
 

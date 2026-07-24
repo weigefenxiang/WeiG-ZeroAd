@@ -15,6 +15,7 @@ record RootStatus(
         String cnProfile,
         String globalProfile,
         long ruleVersion,
+        boolean rulesDownloaded,
         int compiled,
         int running,
         int disabled,
@@ -55,7 +56,8 @@ record RootStatus(
                     json.optString("root_impl", "root"),
                     json.optString("cn_profile", legacy),
                     json.optString("global_profile", "off"),
-                    json.optLong("rule_version"), json.optInt("compiled_rules"),
+                    json.optLong("rule_version"), json.optBoolean("rules_downloaded"),
+                    json.optInt("compiled_rules"),
                     json.optInt("running_rules"), json.optInt("disabled_rules"),
                     json.optInt("user_block_rules"), json.optInt("user_allow_rules"),
                     json.optInt("reward_block_rules"),
@@ -70,7 +72,7 @@ record RootStatus(
     boolean requiresReboot() { return pendingReboot || (installed && !healthy); }
 
     private static RootStatus empty(boolean pending, String error) {
-        return new RootStatus(false, pending, false, false, "unknown", "lean", "off", 0,
+        return new RootStatus(false, pending, false, false, "unknown", "lean", "off", 0, false,
                 0, 0, 0, 0, 0, 0, false, 0, Set.of(), error);
     }
 }

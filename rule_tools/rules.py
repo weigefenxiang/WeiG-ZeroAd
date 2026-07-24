@@ -247,6 +247,7 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
         "reward_default_enabled": True,
         "status_fields": [
             "pending_reboot",
+            "rules_downloaded",
             "compiled_rules",
             "running_rules",
             "disabled_rules",

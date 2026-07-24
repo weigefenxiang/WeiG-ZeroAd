@@ -16,6 +16,7 @@ BACKUP_DIR=$DATA_DIR/backups
 ACTIVE_HOSTS=$STATE_DIR/active.hosts
 PROFILE_STATE=$STATE_DIR/profile
 CN_PROFILE_STATE=$STATE_DIR/cn_profile
+CN_LAST_PROFILE_STATE=$STATE_DIR/cn_profile_last
 GLOBAL_PROFILE_STATE=$STATE_DIR/global_profile
 PROTECTION_STATE=$STATE_DIR/protection
 REWARD_UNTIL_STATE=$STATE_DIR/reward_until
@@ -35,13 +36,22 @@ ensure_state() {
   chmod 0600 "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE" 2>/dev/null
   if [ ! -f "$STATE_DIR/profile_schema3" ]; then
     echo lean > "$CN_PROFILE_STATE"
+    echo lean > "$CN_LAST_PROFILE_STATE"
     echo off > "$GLOBAL_PROFILE_STATE"
     printf '%s\n' reward.tencent reward.wechat reward.short-video reward.other > "$ENABLED_PACKS_STATE"
     touch "$STATE_DIR/profile_schema3"
   fi
   case "$(cat "$CN_PROFILE_STATE" 2>/dev/null)" in
-    lean|balanced|strict) ;;
+    off|lean|balanced|strict) ;;
     *) echo lean > "$CN_PROFILE_STATE" ;;
+  esac
+  case "$(cat "$CN_LAST_PROFILE_STATE" 2>/dev/null)" in
+    lean|balanced|strict) ;;
+    *)
+      current_cn=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
+      case "$current_cn" in lean|balanced|strict) echo "$current_cn" > "$CN_LAST_PROFILE_STATE" ;;
+        *) echo lean > "$CN_LAST_PROFILE_STATE" ;; esac
+      ;;
   esac
   case "$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)" in
     off|lean|balanced|strict) ;;
@@ -256,8 +266,11 @@ build_active() {
   ensure_state
   cn_profile=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
   global_profile=$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)
-  cn_file=$(profile_path cn "$cn_profile") || fail "invalid domestic profile state"
-  [ -f "$cn_file" ] || fail "domestic profile rules are missing: $cn_profile"
+  cn_file=
+  if [ "$cn_profile" != "off" ]; then
+    cn_file=$(profile_path cn "$cn_profile") || fail "invalid domestic profile state"
+    [ -f "$cn_file" ] || fail "domestic profile rules are missing: $cn_profile"
+  fi
   global_file=
   if [ "$global_profile" != "off" ]; then
     global_file=$(profile_path global "$global_profile") || fail "global profile is not installed: $global_profile"
@@ -278,7 +291,7 @@ build_active() {
     sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$skip_file"
   write_reward_union "$reward_file"
   {
-    cat "$cn_file"
+    [ -z "$cn_file" ] || cat "$cn_file"
     [ -z "$global_file" ] || cat "$global_file"
   } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$tmp_dir/profiles"
   awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { print $1 }' \
@@ -351,8 +364,18 @@ set_profile() {
   new_profile=$2
   case "$region" in
     cn)
-      profile_path cn "$new_profile" >/dev/null || fail "unknown domestic profile: $new_profile"
-      echo "$new_profile" > "$CN_PROFILE_STATE"
+      if [ "$new_profile" = "off" ]; then
+        current=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
+        case "$current" in lean|balanced|strict) echo "$current" > "$CN_LAST_PROFILE_STATE" ;; esac
+        echo off > "$CN_PROFILE_STATE"
+      else
+        [ "$new_profile" != "on" ] || new_profile=$(cat "$CN_LAST_PROFILE_STATE" 2>/dev/null)
+        case "$new_profile" in lean|balanced|strict) ;;
+          *) new_profile=lean ;; esac
+        profile_path cn "$new_profile" >/dev/null || fail "unknown domestic profile: $new_profile"
+        echo "$new_profile" > "$CN_PROFILE_STATE"
+        echo "$new_profile" > "$CN_LAST_PROFILE_STATE"
+      fi
       ;;
     global)
       if [ "$new_profile" = "off" ]; then
@@ -428,14 +451,15 @@ status_json() {
   ensure_state
   cn_profile=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
   global_profile=$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)
-  cn_file=$(profile_path cn "$cn_profile" 2>/dev/null)
+  cn_file=
+  [ "$cn_profile" = "off" ] || cn_file=$(profile_path cn "$cn_profile" 2>/dev/null)
   global_file=
   [ "$global_profile" = "off" ] || global_file=$(profile_path global "$global_profile" 2>/dev/null)
   reward_all_tmp=$STATE_DIR/.reward-all.$$
   profile_all_tmp=$STATE_DIR/.profiles-all.$$
   write_reward_union "$reward_all_tmp"
   {
-    cat "$cn_file" 2>/dev/null
+    [ -z "$cn_file" ] || cat "$cn_file" 2>/dev/null
     [ -z "$global_file" ] || cat "$global_file" 2>/dev/null
   } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$profile_all_tmp"
   compiled=$(awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { count++ } END { print count + 0 }' \
@@ -468,12 +492,13 @@ status_json() {
     pending_reboot=false
   fi
   same_file && healthy=true || healthy=false
+  [ -f "$DATA_DIR/rules/current/manifest.json" ] && rules_downloaded=true || rules_downloaded=false
   root_impl=unknown
   command -v magisk >/dev/null 2>&1 && root_impl=magisk
   command -v ksud >/dev/null 2>&1 && root_impl=kernelsu
   command -v apd >/dev/null 2>&1 && root_impl=apatch
-  printf '{"schema":3,"pending_reboot":%s,"protection_enabled":%s,"healthy":%s,"root_impl":"%s","cn_profile":"%s","global_profile":"%s","rule_version":%s,"compiled_rules":%s,"running_rules":%s,"disabled_rules":%s,"user_block_rules":%s,"user_allow_rules":%s,"reward_block_rules":%s,"reward_temporarily_allowed":%s,"reward_expires_at":%s,"enabled_packs":"%s"}\n' \
-    "$pending_reboot" "$protection" "$healthy" "$root_impl" "$cn_profile" "$global_profile" "$version" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
+  printf '{"schema":3,"pending_reboot":%s,"protection_enabled":%s,"healthy":%s,"root_impl":"%s","cn_profile":"%s","global_profile":"%s","rule_version":%s,"rules_downloaded":%s,"compiled_rules":%s,"running_rules":%s,"disabled_rules":%s,"user_block_rules":%s,"user_allow_rules":%s,"reward_block_rules":%s,"reward_temporarily_allowed":%s,"reward_expires_at":%s,"enabled_packs":"%s"}\n' \
+    "$pending_reboot" "$protection" "$healthy" "$root_impl" "$cn_profile" "$global_profile" "$version" "$rules_downloaded" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
 }
 
 ensure_state

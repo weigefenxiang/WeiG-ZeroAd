@@ -39,9 +39,20 @@ echo "$status" | grep -q '"pending_reboot":false'
 echo "$status" | grep -q '"healthy":true'
 echo "$status" | grep -q '"cn_profile":"lean"'
 echo "$status" | grep -q '"global_profile":"off"'
+echo "$status" | grep -q '"rules_downloaded":false'
 echo "$status" | grep -q '"compiled_rules":17041'
 echo "$status" | grep -q '"running_rules":17115'
 echo "$status" | grep -q '"reward_block_rules":74'
+
+bash "$RULECTL" cn-profile off >/dev/null
+status=$(bash "$RULECTL" status)
+echo "$status" | grep -q '"cn_profile":"off"'
+echo "$status" | grep -q '"compiled_rules":0'
+echo "$status" | grep -q '"running_rules":74'
+bash "$RULECTL" cn-profile on >/dev/null
+status=$(bash "$RULECTL" status)
+echo "$status" | grep -q '"cn_profile":"lean"'
+echo "$status" | grep -q '"running_rules":17115'
 
 bash "$RULECTL" domain-disable 0.r.msn.com >/dev/null
 status=$(bash "$RULECTL" status)

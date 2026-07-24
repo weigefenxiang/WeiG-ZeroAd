@@ -22,6 +22,15 @@ final class ReleaseClient {
             for (Asset asset : assets) if (asset.name.toLowerCase(Locale.ROOT).endsWith(suffix)) return asset;
             return null;
         }
+        Asset matching(String fragment, String suffix) {
+            String part = fragment.toLowerCase(Locale.ROOT);
+            String ending = suffix.toLowerCase(Locale.ROOT);
+            for (Asset asset : assets) {
+                String candidate = asset.name.toLowerCase(Locale.ROOT);
+                if (candidate.contains(part) && candidate.endsWith(ending)) return asset;
+            }
+            return null;
+        }
     }
 
     private ReleaseClient() {}

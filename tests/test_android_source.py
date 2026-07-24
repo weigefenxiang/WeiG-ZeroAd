@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 
 
@@ -35,6 +36,27 @@ class AndroidStartupSourceTests(unittest.TestCase):
         )
         self.assertNotIn("Files.readString", source)
         self.assertIn("Files.readAllBytes", source)
+
+    def test_rule_update_requires_check_and_user_confirmation(self) -> None:
+        activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
+            encoding="utf-8"
+        )
+        updater = (ROOT / "app/src/main/java/com/weig/rootad/RuleUpdater.java").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("检查规则更新", activity)
+        self.assertIn("RuleUpdater.checkLatest()", activity)
+        self.assertIn("setPositiveButton", activity)
+        self.assertIn("RuleUpdater.install(this, available)", activity)
+        self.assertIn("rulesDownloaded && available.version() <= currentVersion", activity)
+        self.assertLess(activity.index("RuleUpdater.checkLatest()"),
+                        activity.index("RuleUpdater.install(this, available)"))
+        self.assertIn("Release tag and rule manifest version differ", updater)
+
+    def test_status_contract_supports_domestic_off_and_downloaded_rules(self) -> None:
+        schema = json.loads((ROOT / "api/status.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("off", schema["properties"]["cn_profile"]["enum"])
+        self.assertIn("rules_downloaded", schema["required"])
 
 
 if __name__ == "__main__":

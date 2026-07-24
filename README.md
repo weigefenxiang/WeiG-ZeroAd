@@ -10,6 +10,8 @@ Wei.G ZeroAd is a lightweight, open-source root ad blocker for Android 12–16. 
 - Reward-ad domains never enter normal profiles; four reward packs are enabled by default and can be temporarily allowed for ten minutes.
 - Live running-rule count, instant profile feedback, custom block/allow/disable lists, and complete removal.
 - Independent one-tap updates for rules, manager APK, and core.
+- Rule updates are checked first and require confirmation before download/install.
+- Domestic filtering has an independent on/off switch.
 - Automatic light/dark theme and a prefilled GitHub Issue report.
 
 Rules are maintained and released separately by [`WeiG-ZeroAd-Rules`](https://github.com/weigefenxiang/WeiG-ZeroAd-Rules). Rule ZIPs are data-only and are validated again by both the manager and root core before atomic activation.
