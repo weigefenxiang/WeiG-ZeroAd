@@ -12,18 +12,19 @@ systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 - 显示当前运行规则数量，支持自定义拦截、放行和停用域名。
 - 规则、APK 和核心可分别检查并更新，下载后再次校验。
 - 白天、黑暗模式自动跟随系统；右上角图标可直接切换，长按恢复跟随系统。
-- 提供不记录访问域名的轻量运行日志和安全 GitHub Issue 诊断。
+- 提供不记录访问域名的轻量运行日志、管理器闪退记录和安全 GitHub Issue 诊断。
 - 卸载时可删除核心、挂载、官方规则、自定义规则和全部运行状态。
 
 ## 安装
 
-普通用户下载正式版 `WeiG-ZeroAd-v0.1.2.zip`，使用 MMRL、Magisk、KernelSU
+普通用户下载正式版 `WeiG-ZeroAd-v0.1.3.zip`，使用 MMRL、Magisk、KernelSU
 或 APatch 安装，然后重启设备。该安装包同时包含核心和管理器。
 
-- `WeiG-ZeroAd-v0.1.2-core-only.zip`：仅核心。
-- `WeiG-ZeroAd-Manager-v0.1.2.apk`：单独安装或更新 APK。
+- `WeiG-ZeroAd-v0.1.3-core-only.zip`：仅核心。
+- `WeiG-ZeroAd-Manager-v0.1.3.apk`：单独安装或更新 APK。
 
-`v0.1.2` 是管理器安装修复版；核心仍为 `0.1.1`，无需因本次修复单独更新核心。
+`v0.1.3` 修复主题切换闪退并增加管理器闪退记录，同时包含 `v0.1.2`
+的 APK 安装修复。核心仍为 `0.1.1`，无需因本次修复单独更新核心。
 
 首次安装核心以及以后更新核心都需要重启。切换过滤模式、更新规则和更新 APK
 不需要重启。
@@ -45,9 +46,9 @@ systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 
 ## 运行日志与问题反馈
 
-“支持与卸载”中的运行日志记录核心启动、规则版本、过滤模式、保护启停和已加载
-规则数量，最多保留最近 200 条。日志不会记录实际访问域名、应用、Cookie 或
-HTTPS 内容。
+“支持与卸载”中的运行日志记录核心启动、规则版本、过滤模式、保护启停、已加载
+规则数量及最近 10 次管理器闪退。核心事件最多保留最近 200 条。日志不会记录
+实际访问域名、应用、Cookie 或 HTTPS 内容。
 
 “问题反馈 · 提交 GitHub Issue”会预填 APK、核心、Android、Root、规则版本、
 过滤模式、运行规则数量及少量安全事件，便于排查问题。
@@ -76,8 +77,8 @@ git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 本地验证与构建：
@@ -87,8 +88,8 @@ python -m rule_tools.build_rules
 python -m unittest discover -s tests -v
 bash tests/runtime_module.sh
 gradle :app:assembleDebug
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.2-core-only.zip
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.2.zip \
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.3-core-only.zip
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.3.zip \
   --manager-apk app/build/outputs/apk/debug/app-debug.apk
 ```
 

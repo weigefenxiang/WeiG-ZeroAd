@@ -90,7 +90,10 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn("theme.setOnClickListener(view -> toggleTheme())", activity)
         self.assertIn("theme.setOnLongClickListener", activity)
         self.assertIn("followSystemTheme()", activity)
-        self.assertIn("applyThemeOverride();", activity)
+        self.assertIn("attachBaseContext(Context base)", activity)
+        self.assertIn("base.createConfigurationContext(themed)", activity)
+        self.assertIn(".commit();", activity)
+        self.assertNotIn("applyOverrideConfiguration", activity)
         self.assertNotIn("setSingleChoiceItems", activity)
 
     def test_support_section_exposes_safe_logs_and_issue_diagnostics(self) -> None:
@@ -98,10 +101,20 @@ class AndroidStartupSourceTests(unittest.TestCase):
             encoding="utf-8"
         )
         core = (ROOT / "module/bin/rulectl").read_text(encoding="utf-8")
+        crash_log = (
+            ROOT / "app/src/main/java/com/weig/rootad/CrashLog.java"
+        ).read_text(encoding="utf-8")
+        manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
         self.assertIn("查看运行日志", activity)
         self.assertIn("问题反馈 · 提交 GitHub Issue", activity)
         self.assertIn('RootShell.runControl("events")', activity)
         self.assertIn("最近事件 / Recent events", activity)
+        self.assertIn("管理器闪退", activity)
+        self.assertIn("CrashLog.latest(this)", activity)
+        self.assertIn('android:name=".ZeroAdApplication"', manifest)
+        self.assertIn("Thread.setDefaultUncaughtExceptionHandler", crash_log)
+        self.assertIn("MAX_RECORDS = 10", crash_log)
+        self.assertIn("<redacted>", crash_log)
         self.assertIn("EVENT_LOG=$STATE_DIR/events.log", core)
         self.assertIn("tail -n 200", core)
         self.assertNotIn("query.log", core)
@@ -124,8 +137,8 @@ class AndroidStartupSourceTests(unittest.TestCase):
     def test_manager_hotfix_has_a_new_update_version(self) -> None:
         gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
         module = (ROOT / "module/module.prop").read_text(encoding="utf-8")
-        self.assertIn('versionName = "0.1.2"', gradle)
-        self.assertIn("versionCode = 5", gradle)
+        self.assertIn('versionName = "0.1.3"', gradle)
+        self.assertIn("versionCode = 6", gradle)
         self.assertIn("version=0.1.1", module)
         self.assertIn("versionCode=3", module)
 

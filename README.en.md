@@ -14,20 +14,21 @@ APatch.
 - Live loaded-rule count and custom block, allow, and disabled-domain lists.
 - Separate, verified updates for rules, APK, and core.
 - Automatic system light/dark theme with a direct theme toggle.
-- Privacy-safe runtime logs and a prefilled GitHub Issue report.
+- Privacy-safe runtime and manager-crash logs with a prefilled GitHub Issue report.
 - Complete removal of the core, mounts, rules, custom data, and runtime state.
 
 ## Install
 
-For the official `v0.1.2` release, most users should download
-`WeiG-ZeroAd-v0.1.2.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
+For the official `v0.1.3` release, most users should download
+`WeiG-ZeroAd-v0.1.3.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
 then reboot. The package includes both the core and manager.
 
-- `WeiG-ZeroAd-v0.1.2-core-only.zip`: core only.
-- `WeiG-ZeroAd-Manager-v0.1.2.apk`: standalone APK install or update.
+- `WeiG-ZeroAd-v0.1.3-core-only.zip`: core only.
+- `WeiG-ZeroAd-Manager-v0.1.3.apk`: standalone APK install or update.
 
-`v0.1.2` is a manager installer hotfix. The core remains at `0.1.1` and does
-not need a separate update for this fix.
+`v0.1.3` fixes the theme-switch crash and adds manager crash records. It also
+includes the `v0.1.2` APK installer fix. The core remains at `0.1.1` and does
+not need a separate update for this release.
 
 Installing or updating the core requires a reboot. Profile changes, rule
 updates, and APK updates do not.
@@ -46,8 +47,9 @@ installation can fall back to the bundled Wei.G 20260723 base rules.
 ## Logs and support
 
 Runtime logs contain core startup, rule version, selected profiles, protection
-state, and loaded-rule counts. They retain at most 200 events and never record
-visited domains, apps, cookies, or HTTPS content.
+state, loaded-rule counts, and up to ten recent manager crashes. Core history
+retains at most 200 events. Logs never record visited domains, apps, cookies,
+or HTTPS content.
 
 “Report issue · GitHub” prefills safe device and ZeroAd diagnostics to make
 troubleshooting easier.
@@ -71,7 +73,7 @@ GPL-3.0
 <details>
 <summary>Developer: publish from Git</summary>
 
-Pushes to `main` refresh the rolling test release. The `v0.1.2` tag creates the
+Pushes to `main` refresh the rolling test release. The `v0.1.3` tag creates the
 official immutable release.
 
 ```bash
@@ -79,8 +81,8 @@ git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 Build environment: JDK 17, Gradle 9.6, AGP 9.2, `compileSdk 36`,

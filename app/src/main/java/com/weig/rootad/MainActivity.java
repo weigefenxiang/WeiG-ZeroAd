@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -76,8 +77,22 @@ public final class MainActivity extends Activity {
         }
     };
 
+    @Override protected void attachBaseContext(Context base) {
+        int mode = base.getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE)
+                .getInt(THEME_OVERRIDE, THEME_SYSTEM);
+        if (mode == THEME_SYSTEM) {
+            super.attachBaseContext(base);
+            return;
+        }
+        Configuration themed = new Configuration(base.getResources().getConfiguration());
+        int night = mode == THEME_DARK
+                ? Configuration.UI_MODE_NIGHT_YES
+                : Configuration.UI_MODE_NIGHT_NO;
+        themed.uiMode = (themed.uiMode & ~Configuration.UI_MODE_NIGHT_MASK) | night;
+        super.attachBaseContext(base.createConfigurationContext(themed));
+    }
+
     @Override public void onCreate(Bundle state) {
-        applyThemeOverride();
         super.onCreate(state);
         zh = Locale.getDefault().getLanguage().equals("zh");
         surface = getColor(R.color.surface); card = getColor(R.color.surface_card);
@@ -112,30 +127,27 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    private void applyThemeOverride() {
-        int mode = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE)
-                .getInt(THEME_OVERRIDE, THEME_SYSTEM);
-        if (mode == THEME_SYSTEM) return;
-        Configuration override = new Configuration();
-        override.uiMode = mode == THEME_DARK
-                ? Configuration.UI_MODE_NIGHT_YES
-                : Configuration.UI_MODE_NIGHT_NO;
-        applyOverrideConfiguration(override);
-    }
-
     private void toggleTheme() {
         boolean dark = (getResources().getConfiguration().uiMode &
                 Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
+        boolean saved = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
                 .putInt(THEME_OVERRIDE, dark ? THEME_LIGHT : THEME_DARK)
-                .apply();
+                .commit();
+        if (!saved) {
+            toast(t("无法保存主题设置", "Cannot save theme setting"));
+            return;
+        }
         recreate();
     }
 
     private void followSystemTheme() {
-        getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
+        boolean saved = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
                 .remove(THEME_OVERRIDE)
-                .apply();
+                .commit();
+        if (!saved) {
+            toast(t("无法保存主题设置", "Cannot save theme setting"));
+            return;
+        }
         toast(t("已恢复跟随系统", "Following system theme"));
         recreate();
     }
@@ -592,11 +604,12 @@ public final class MainActivity extends Activity {
         busy(true, t("正在读取运行日志…", "Reading runtime log…"));
         worker.execute(() -> {
             RootShell.Result result = RootShell.runControl("events");
-            main.post(() -> presentRuntimeLog(result));
+            String crashes = CrashLog.read(this);
+            main.post(() -> presentRuntimeLog(result, crashes));
         });
     }
 
-    private void presentRuntimeLog(RootShell.Result result) {
+    private void presentRuntimeLog(RootShell.Result result, String crashes) {
         busy(false, null);
         String raw = result.ok() ? result.output() : "";
         long startedAt = readStartedAt(raw);
@@ -607,10 +620,12 @@ public final class MainActivity extends Activity {
                 t(" 条拦截规则", " blocking rules") + "\n" +
                 t("保护运行时间：", "Protection uptime: ") +
                 protectionDuration(startedAt, status != null && status.protection()) +
-                "\n\n" + (result.ok()
+                "\n\n" + t("核心事件", "Core events") + "\n" + (result.ok()
                 ? (events.isBlank() ? t("暂无事件记录", "No events recorded") : events)
                 : t("当前核心不支持运行日志，请更新核心并重启。",
-                        "The installed core does not support runtime logs. Update it and reboot."));
+                        "The installed core does not support runtime logs. Update it and reboot.")) +
+                "\n\n" + t("管理器闪退", "Manager crashes") + "\n" +
+                (crashes.isBlank() ? t("暂无闪退记录", "No crash records") : crashes);
         TextView content = text(summary, 12, primary, Typeface.NORMAL);
         content.setTypeface(Typeface.MONOSPACE);
         content.setTextIsSelectable(true);
@@ -634,14 +649,15 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             RootShell.Result events = RootShell.runControl("events");
             String recent = events.ok() ? recentEventLines(events.output(), 8) : "";
-            main.post(() -> launchIssue(recent));
+            String crash = CrashLog.latest(this);
+            main.post(() -> launchIssue(recent, crash));
         });
     }
 
-    private void launchIssue(String recentEvents) {
+    private void launchIssue(String recentEvents, String crash) {
         busy(false, null);
         RootStatus status = latest;
-        String title = "[Rule] ";
+        String title = "[Issue] ";
         String body = "## 问题描述 / Description\n\n\n## 安全诊断 / Safe diagnostics\n" +
                 "- APK: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")" +
                 "\n- Android: " + android.os.Build.VERSION.RELEASE +
@@ -655,6 +671,9 @@ public final class MainActivity extends Activity {
                         "\n- Protection: " + status.protection()) +
                 (recentEvents.isBlank() ? "" :
                         "\n\n## 最近事件 / Recent events\n```\n" + recentEvents + "\n```") +
+                (crash.isBlank() ? "" :
+                        "\n\n## 最近一次管理器闪退 / Latest manager crash\n```\n" +
+                                crash.replace("```", "'''") + "\n```") +
                 "\n\n请勿附加账号令牌、Cookie 或完整 HTTPS 数据。" +
                 "\nDo not attach account tokens, cookies, or full HTTPS payloads.";
         String url = "https://github.com/" + BuildConfig.GITHUB_OWNER + "/" + BuildConfig.CODE_REPOSITORY +
