@@ -106,6 +106,29 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn("tail -n 200", core)
         self.assertNotIn("query.log", core)
 
+    def test_apk_installer_closes_streams_before_committing_session(self) -> None:
+        installer = (ROOT / "app/src/main/java/com/weig/rootad/ApkInstaller.java").read_text(
+            encoding="utf-8"
+        )
+        stream_scope = installer.index("try (FileInputStream input")
+        fsync = installer.index("session.fsync(output)", stream_scope)
+        stream_scope_end = installer.index(
+            "// PackageInstaller rejects commit()", fsync
+        )
+        commit = installer.index("session.commit(", stream_scope_end)
+        self.assertLess(fsync, stream_scope_end)
+        self.assertLess(stream_scope_end, commit)
+        self.assertIn("installer.abandonSession(sessionId)", installer)
+        self.assertIn("APK 安装失败：", installer)
+
+    def test_manager_hotfix_has_a_new_update_version(self) -> None:
+        gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
+        module = (ROOT / "module/module.prop").read_text(encoding="utf-8")
+        self.assertIn('versionName = "0.1.2"', gradle)
+        self.assertIn("versionCode = 5", gradle)
+        self.assertIn("version=0.1.1", module)
+        self.assertIn("versionCode=3", module)
+
     def test_readme_is_chinese_first_and_hides_git_publish_details(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         english = (ROOT / "README.en.md").read_text(encoding="utf-8")

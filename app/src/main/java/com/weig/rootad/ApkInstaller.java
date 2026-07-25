@@ -17,6 +17,7 @@ import android.provider.Settings;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.OutputStream;
+import java.util.Locale;
 
 final class ApkInstaller {
     interface Callback { void completed(String message, boolean success); }
@@ -30,7 +31,9 @@ final class ApkInstaller {
             Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:" + activity.getPackageName()));
             activity.startActivity(settings);
-            callback.completed("Allow updates from WeiG ZeroAd, then tap update again.", false);
+            callback.completed(message(
+                    "请允许 WeiG ZeroAd 安装应用，然后再次点击更新。",
+                    "Allow WeiG ZeroAd to install apps, then tap update again."), false);
             return;
         }
         BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -44,12 +47,34 @@ final class ApkInstaller {
                         //noinspection deprecation
                         confirmation = intent.getParcelableExtra(Intent.EXTRA_INTENT);
                     }
-                    if (confirmation != null) activity.startActivity(confirmation);
+                    if (confirmation != null) {
+                        try {
+                            activity.startActivity(confirmation);
+                            callback.completed(message(
+                                    "请在系统安装界面确认更新。",
+                                    "Confirm the update in the system installer."), false);
+                        } catch (Exception error) {
+                            unregister(activity, this);
+                            callback.completed(message(
+                                    "无法打开系统安装界面：",
+                                    "Cannot open the system installer: ") + error.getMessage(), false);
+                        }
+                    } else {
+                        unregister(activity, this);
+                        callback.completed(message(
+                                "系统没有返回安装确认界面。",
+                                "The system did not return an installation confirmation."), false);
+                    }
                     return;
                 }
-                try { activity.unregisterReceiver(this); } catch (Exception ignored) {}
-                callback.completed(intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE),
-                        status == PackageInstaller.STATUS_SUCCESS);
+                unregister(activity, this);
+                if (status == PackageInstaller.STATUS_SUCCESS) {
+                    callback.completed(message("APK 更新成功。", "APK update installed."), true);
+                    return;
+                }
+                String detail = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                if (detail == null || detail.isBlank()) detail = "status=" + status;
+                callback.completed(message("APK 安装失败：", "APK installation failed: ") + detail, false);
             }
         };
         if (Build.VERSION.SDK_INT >= 33) {
@@ -64,19 +89,40 @@ final class ApkInstaller {
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(activity.getPackageName());
         params.setSize(apk.length());
-        int sessionId = installer.createSession(params);
-        try (PackageInstaller.Session session = installer.openSession(sessionId);
-             FileInputStream input = new FileInputStream(apk);
-             OutputStream output = session.openWrite("WeiGZeroAd.apk", 0, apk.length())) {
-            byte[] buffer = new byte[16 * 1024];
-            int read;
-            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
-            session.fsync(output);
-            Intent result = new Intent(ACTION).setPackage(activity.getPackageName());
-            PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, result,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
-            session.commit(pending.getIntentSender());
+        int sessionId = -1;
+        try {
+            sessionId = installer.createSession(params);
+            try (PackageInstaller.Session session = installer.openSession(sessionId)) {
+                try (FileInputStream input = new FileInputStream(apk);
+                     OutputStream output = session.openWrite(
+                             "WeiGZeroAd.apk", 0, apk.length())) {
+                    byte[] buffer = new byte[16 * 1024];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+                    session.fsync(output);
+                }
+
+                // PackageInstaller rejects commit() while an APK stream is still open.
+                Intent result = new Intent(ACTION).setPackage(activity.getPackageName());
+                PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, result,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
+                session.commit(pending.getIntentSender());
+            }
+        } catch (Exception error) {
+            if (sessionId >= 0) {
+                try { installer.abandonSession(sessionId); } catch (Exception ignored) {}
+            }
+            unregister(activity, receiver);
+            throw error;
         }
+    }
+
+    private static void unregister(Activity activity, BroadcastReceiver receiver) {
+        try { activity.unregisterReceiver(receiver); } catch (Exception ignored) {}
+    }
+
+    private static String message(String chinese, String english) {
+        return Locale.getDefault().getLanguage().equals("zh") ? chinese : english;
     }
 
     private static void verifySigner(Activity activity, File apk) throws Exception {

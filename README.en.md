@@ -19,12 +19,15 @@ APatch.
 
 ## Install
 
-For the official `v0.1.1` release, most users should download
-`WeiG-ZeroAd-v0.1.1.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
+For the official `v0.1.2` release, most users should download
+`WeiG-ZeroAd-v0.1.2.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
 then reboot. The package includes both the core and manager.
 
-- `WeiG-ZeroAd-v0.1.1-core-only.zip`: core only.
-- `WeiG-ZeroAd-Manager-v0.1.1.apk`: standalone APK install or update.
+- `WeiG-ZeroAd-v0.1.2-core-only.zip`: core only.
+- `WeiG-ZeroAd-Manager-v0.1.2.apk`: standalone APK install or update.
+
+`v0.1.2` is a manager installer hotfix. The core remains at `0.1.1` and does
+not need a separate update for this fix.
 
 Installing or updating the core requires a reboot. Profile changes, rule
 updates, and APK updates do not.
@@ -68,7 +71,7 @@ GPL-3.0
 <details>
 <summary>Developer: publish from Git</summary>
 
-Pushes to `main` refresh the rolling test release. The `v0.1.1` tag creates the
+Pushes to `main` refresh the rolling test release. The `v0.1.2` tag creates the
 official immutable release.
 
 ```bash
@@ -76,8 +79,8 @@ git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 Build environment: JDK 17, Gradle 9.6, AGP 9.2, `compileSdk 36`,
