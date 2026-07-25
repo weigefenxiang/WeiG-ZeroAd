@@ -38,8 +38,8 @@ status=$(bash "$RULECTL" status)
 echo "$status" | grep -q '"protection_enabled":true'
 echo "$status" | grep -q '"pending_reboot":false'
 echo "$status" | grep -q '"healthy":true'
-echo "$status" | grep -q '"core_version":"0.1.0"'
-echo "$status" | grep -q '"core_version_code":2'
+echo "$status" | grep -q '"core_version":"0.1.1"'
+echo "$status" | grep -q '"core_version_code":3'
 echo "$status" | grep -q '"cn_profile":"lean"'
 echo "$status" | grep -q '"global_profile":"off"'
 echo "$status" | grep -q '"rules_downloaded":false'
@@ -99,5 +99,14 @@ bash "$RULECTL" allow-add custom-ad.example >/dev/null
 bash "$RULECTL" list-allow | grep -qx 'custom-ad.example'
 status=$(bash "$RULECTL" status)
 echo "$status" | grep -q '"running_rules":17108'
+
+events=$(bash "$RULECTL" events)
+echo "$events" | grep -Eq '^started_at=[0-9]+'
+echo "$events" | grep -q 'applied cn=balanced global=lean running=17108'
+if echo "$events" | grep -q 'custom-ad.example'; then
+  echo "runtime log leaked a custom domain" >&2
+  exit 1
+fi
+test "$(printf '%s\n' "$events" | wc -l)" -le 201
 
 echo "module runtime simulation passed"

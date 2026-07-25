@@ -6,4 +6,7 @@
     <color name="accent">#2563EB</color>
     <color name="accent_soft">#E8F0FF</color>
     <color name="divider">#E4E7EC</color>
+    <color name="update_available">#15803D</color>
+    <color name="update_unavailable">#64748B</color>
+    <color name="update_error">#B91C1C</color>
 </resources>

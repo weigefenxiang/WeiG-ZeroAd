@@ -21,6 +21,8 @@ GLOBAL_PROFILE_STATE=$STATE_DIR/global_profile
 PROTECTION_STATE=$STATE_DIR/protection
 REWARD_UNTIL_STATE=$STATE_DIR/reward_until
 RULE_VERSION_STATE=$STATE_DIR/rule_version
+PROTECTION_STARTED_STATE=$STATE_DIR/protection_started_at
+EVENT_LOG=$STATE_DIR/events.log
 ENABLED_PACKS_STATE=$USER_DIR/packs.enabled
 RULE_FILES="cn-lean.domains cn-balanced.domains cn-strict.domains global-lean.domains global-balanced.domains global-strict.domains reward-ads.domains reward-tencent.domains reward-wechat.domains reward-short-video.domains reward-other.domains manifest.json packs.json"
 
@@ -33,7 +35,9 @@ ensure_state() {
   mkdir -p "$STATE_DIR" "$USER_DIR" "$BACKUP_DIR" || fail "cannot create state directory"
   chmod 0700 "$DATA_DIR" "$STATE_DIR" "$USER_DIR" "$BACKUP_DIR" 2>/dev/null
   touch "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE"
+  touch "$EVENT_LOG"
   chmod 0600 "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE" 2>/dev/null
+  chmod 0600 "$EVENT_LOG" 2>/dev/null
   if [ ! -f "$STATE_DIR/profile_schema3" ]; then
     echo lean > "$CN_PROFILE_STATE"
     echo lean > "$CN_LAST_PROFILE_STATE"
@@ -58,6 +62,12 @@ ensure_state() {
     *) echo off > "$GLOBAL_PROFILE_STATE" ;;
   esac
   [ -s "$PROTECTION_STATE" ] || echo 1 > "$PROTECTION_STATE"
+  if [ "$(cat "$PROTECTION_STATE" 2>/dev/null)" = "1" ]; then
+    started=$(cat "$PROTECTION_STARTED_STATE" 2>/dev/null)
+    case "$started" in ''|*[!0-9]*) date +%s > "$PROTECTION_STARTED_STATE" ;; esac
+  else
+    echo 0 > "$PROTECTION_STARTED_STATE"
+  fi
   [ -s "$REWARD_UNTIL_STATE" ] || echo 0 > "$REWARD_UNTIL_STATE"
   if [ ! -s "$RULE_VERSION_STATE" ]; then
     manifest=$MODDIR/rules/manifest.json
@@ -141,6 +151,25 @@ count_running() {
   awk '$1 == "0.0.0.0" && NF >= 2 { count++ } END { print count + 0 }' "$ACTIVE_HOSTS"
 }
 
+log_event() {
+  message=$(printf '%s' "$*" | sed 's/|/-/g')
+  printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$EVENT_LOG"
+  lines=$(wc -l < "$EVENT_LOG" 2>/dev/null)
+  case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+  if [ "$lines" -gt 200 ]; then
+    tail -n 200 "$EVENT_LOG" > "$EVENT_LOG.tmp" && mv -f "$EVENT_LOG.tmp" "$EVENT_LOG"
+  fi
+  chmod 0600 "$EVENT_LOG" 2>/dev/null
+}
+
+print_events() {
+  ensure_state
+  started=$(cat "$PROTECTION_STARTED_STATE" 2>/dev/null)
+  case "$started" in ''|*[!0-9]*) started=0 ;; esac
+  printf 'started_at=%s\n' "$started"
+  tail -n 200 "$EVENT_LOG" 2>/dev/null
+}
+
 validate_rule_file() {
   file=$1
   minimum=${2:-1}
@@ -209,6 +238,7 @@ install_rule_directory() {
   echo "$version" > "$RULE_VERSION_STATE"
   rm -rf "$source_dir"
   build_active
+  log_event "rules-installed version=$version"
   status_json
 }
 
@@ -223,6 +253,7 @@ rollback_rules() {
   case "$version" in ''|*[!0-9]*) version=0 ;; esac
   echo "$version" > "$RULE_VERSION_STATE"
   build_active
+  log_event "rules-rollback version=$version"
   status_json
 }
 
@@ -331,6 +362,7 @@ build_active() {
 
   publish_active "$output_file"
   rm -rf "$tmp_dir"
+  log_event "applied cn=$cn_profile global=$global_profile running=$running"
 }
 
 list_add() {
@@ -414,6 +446,7 @@ start_reward_timer() {
   expires=$(( $(date +%s) + minutes * 60 ))
   echo "$expires" > "$REWARD_UNTIL_STATE"
   build_active
+  log_event "reward-allow minutes=$minutes"
   if [ "$TEST_MODE" != "1" ]; then
     (
       sleep $(( minutes * 60 ))
@@ -427,9 +460,12 @@ expire_reward() {
   expected=$1
   ensure_state
   actual=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
+  case "$actual" in ''|*[!0-9]*) actual=0 ;; esac
   [ "$expected" = "$actual" ] || return 0
+  [ "$actual" -gt 0 ] || return 0
   echo 0 > "$REWARD_UNTIL_STATE"
   build_active
+  log_event "reward-blocking-restored"
 }
 
 resume_reward_timer() {
@@ -558,12 +594,16 @@ case "$command" in
     ;;
   protection-on)
     echo 1 > "$PROTECTION_STATE"
+    date +%s > "$PROTECTION_STARTED_STATE"
     build_active
+    log_event "protection-enabled"
     status_json
     ;;
   protection-off)
     echo 0 > "$PROTECTION_STATE"
+    echo 0 > "$PROTECTION_STARTED_STATE"
     build_active
+    log_event "protection-disabled"
     status_json
     ;;
   domain-disable)
@@ -625,6 +665,9 @@ case "$command" in
     ;;
   list-block)
     cat "$USER_DIR/block.txt"
+    ;;
+  events)
+    print_events
     ;;
   cleanup-mount)
     if [ "$TEST_MODE" = "1" ]; then

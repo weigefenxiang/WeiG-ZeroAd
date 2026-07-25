@@ -5,5 +5,5 @@
 - `WeiG-ZeroAd-{{TAG}}-core-only.zip`: core only, for advanced users.
 - `WeiG-ZeroAd-Manager-{{TAG}}.apk`: standalone manager install/update.
 
-- `WeiG-ZeroAd-{{TAG}}-core-only.zip`：仅核心，供高级用户使用。
-- `WeiG-ZeroAd-Manager-{{TAG}}.apk`：单独安装或更新管理器。
+- `WeiG-ZeroAd-{{TAG}}-core-only.zip`：仅核心。
+- `WeiG-ZeroAd-Manager-{{TAG}}.apk`：单独安装或更新 APK。

@@ -48,8 +48,10 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn("RuleUpdater.checkLatest()", activity)
         self.assertIn("CodeUpdater.check(this)", activity)
         self.assertIn("更新规则", activity)
-        self.assertIn("更新管理器", activity)
+        self.assertIn("更新 APK", activity)
         self.assertIn("更新核心", activity)
+        self.assertIn("styleUpdateButton", activity)
+        self.assertIn("updateAvailable", activity)
         self.assertIn("RuleUpdater.install(this, available)", activity)
         self.assertLess(activity.index("RuleUpdater.checkLatest()"),
                         activity.index("RuleUpdater.install(this, available)"))
@@ -79,6 +81,36 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn("rules_downloaded", schema["required"])
         self.assertIn("core_version", schema["required"])
         self.assertIn("core_version_code", schema["required"])
+
+    def test_theme_icon_toggles_directly_and_can_restore_system_mode(self) -> None:
+        activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("R.drawable.ic_theme", activity)
+        self.assertIn("theme.setOnClickListener(view -> toggleTheme())", activity)
+        self.assertIn("theme.setOnLongClickListener", activity)
+        self.assertIn("followSystemTheme()", activity)
+        self.assertIn("applyThemeOverride();", activity)
+        self.assertNotIn("setSingleChoiceItems", activity)
+
+    def test_support_section_exposes_safe_logs_and_issue_diagnostics(self) -> None:
+        activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
+            encoding="utf-8"
+        )
+        core = (ROOT / "module/bin/rulectl").read_text(encoding="utf-8")
+        self.assertIn("查看运行日志", activity)
+        self.assertIn("问题反馈 · 提交 GitHub Issue", activity)
+        self.assertIn('RootShell.runControl("events")', activity)
+        self.assertIn("最近事件 / Recent events", activity)
+        self.assertIn("EVENT_LOG=$STATE_DIR/events.log", core)
+        self.assertIn("tail -n 200", core)
+        self.assertNotIn("query.log", core)
+
+    def test_readme_is_chinese_first_and_hides_git_publish_details(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## 主要功能", readme)
+        self.assertIn("<summary>开发者：直接从 Git 发布</summary>", readme)
+        self.assertLess(readme.index("## 主要功能"), readme.index("<summary>English</summary>"))
 
 
 if __name__ == "__main__":

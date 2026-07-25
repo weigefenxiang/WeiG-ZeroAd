@@ -1,68 +1,110 @@
 # Wei.G ZeroAd
 
-[简体中文](README.zh-CN.md)
+Wei.G ZeroAd 是面向 Android 12–16 的轻量 Root 去广告工具。原生管理器控制
+systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 
-Wei.G ZeroAd is a lightweight, open-source root ad blocker for Android 12–16. One native manager controls a systemless-hosts core compatible with Magisk, KernelSU, and APatch.
+## 主要功能
 
-## Highlights
+- 境内、境外规则可分别选择关闭、精简、平衡或严格。
+- 奖励广告规则与普通规则完全分离，默认启用，可临时放行 10 分钟。
+- 显示当前运行规则数量，支持自定义拦截、放行和停用域名。
+- 规则、APK 和核心可分别检查并更新，下载后再次校验。
+- 白天、黑暗模式自动跟随系统；右上角图标可直接切换，长按恢复跟随系统。
+- 提供不记录访问域名的轻量运行日志和安全 GitHub Issue 诊断。
+- 卸载时可删除核心、挂载、官方规则、自定义规则和全部运行状态。
 
-- Separate Domestic and Global profiles: Lean, Balanced, and Strict.
-- Reward-ad domains never enter normal profiles; four reward packs are enabled by default and can be temporarily allowed for ten minutes.
-- Live running-rule count, instant profile feedback, custom block/allow/disable lists, and complete removal.
-- Independent one-tap updates for rules, manager APK, and core.
-- Rule updates are checked first and require confirmation before download/install.
-- Domestic and Global profiles both use symmetric Off, Lean, Balanced, and Strict buttons.
-- A single update check reports Rules, Manager, and Core separately; each update
-  requires its own user action and checksum verification.
-- Automatic light/dark theme and a prefilled GitHub Issue report.
+## 安装
 
-Rules are maintained and released separately by [`WeiG-ZeroAd-Rules`](https://github.com/weigefenxiang/WeiG-ZeroAd-Rules). Rule ZIPs are data-only and are validated again by both the manager and root core before atomic activation.
+普通用户下载最新的 `WeiG-ZeroAd-vX.Y.Z.zip`，使用 MMRL、Magisk、KernelSU
+或 APatch 安装，然后重启设备。该安装包同时包含核心和管理器。
 
-Publish the rules repository first. The manager/core Release workflow downloads its latest verified rule ZIP and embeds it, so first boot already has all six real profiles; later rule-only updates remain independent.
+- `WeiG-ZeroAd-vX.Y.Z-core-only.zip`：仅核心。
+- `WeiG-ZeroAd-Manager-vX.Y.Z.apk`：单独安装或更新 APK。
 
-If downloading or validating a rule update fails, an installed device keeps its current rules. A first install, or a release build without a valid rule ZIP, falls back to the bundled Wei.G 20260723 baseline; reward-ad domains remain separate.
+首次安装核心以及以后更新核心都需要重启。切换过滤模式、更新规则和更新 APK
+不需要重启。
 
-## Install
+默认配置：境内精简、境外关闭、四组奖励广告规则全部启用。
 
-Most users should download `WeiG-ZeroAd-test.zip` from the rolling test Release, install it with MMRL, Magisk, KernelSU, or APatch, and reboot. It contains both the core and manager.
+## 使用与更新
 
-Advanced users may use:
+管理器首页显示当前保护状态和已加载规则数量。点击“检查更新”后，规则、APK
+和核心分别显示版本与状态；只有存在更新的按钮才可点击，并以绿色显示。
 
-- `WeiG-ZeroAd-test-core-only.zip`: core only.
-- `WeiG-ZeroAd-Manager-test.apk`: standalone manager.
+规则由独立仓库
+[`WeiG-ZeroAd-Rules`](https://github.com/weigefenxiang/WeiG-ZeroAd-Rules)
+维护。规则 ZIP 只包含数据，管理器和 Root 核心都会再次检查文件哈希、数量、
+配置包含关系、区域隔离和奖励广告隔离，然后原子替换当前规则。
 
-Only the first core installation and later core updates require a reboot. Profile changes, rule updates, and manager updates do not.
+如果规则下载或校验失败，设备继续使用当前规则。首次安装无法获得在线规则时，
+使用内置 Wei.G 20260723 基础规则，奖励广告域名仍保持独立。
 
-Default configuration: Domestic Lean, Global Off, and all reward-ad packs enabled.
+## 运行日志与问题反馈
 
-## Publish from Git
+“支持与卸载”中的运行日志记录核心启动、规则版本、过滤模式、保护启停和已加载
+规则数量，最多保留最近 200 条。日志不会记录实际访问域名、应用、Cookie 或
+HTTPS 内容。
 
-Every push to `main` refreshes the rolling `test-latest` pre-release. A version tag creates an immutable stable release.
+“问题反馈 · 提交 GitHub Issue”会预填 APK、核心、Android、Root、规则版本、
+过滤模式、运行规则数量及少量安全事件，便于排查问题。
+
+## 限制
+
+hosts 无法处理广告与正文共用同一域名、硬编码 IP，或应用完全绕过系统解析器的
+内置加密 DNS。ZeroAd 不修改其他应用的私有数据，也不会禁用其组件。
+
+## 引用与致谢
+
+[StevenBlack](https://github.com/StevenBlack/hosts) ·
+[anti-AD](https://github.com/privacy-protection-tools/anti-AD) ·
+[HaGeZi](https://github.com/hagezi/dns-blocklists) ·
+[217heidai](https://github.com/217heidai/adblockfilters)
+
+GPL-3.0
+
+<details>
+<summary>English</summary>
+
+Wei.G ZeroAd is a lightweight root ad blocker for Android 12–16. Its native
+manager controls a systemless-hosts core compatible with Magisk, KernelSU, and
+APatch. Domestic and Global profiles are independent, reward-ad packs remain
+separate, and rules, APK, and core can be updated individually.
+
+Download the latest `WeiG-ZeroAd-vX.Y.Z.zip` for the combined core and manager.
+Core installation or updates require a reboot; rule, profile, and APK changes do
+not. Runtime logs contain operational events and rule counts only—never browsing
+domains or HTTPS payloads.
+
+</details>
+
+<details>
+<summary>开发者：直接从 Git 发布</summary>
+
+推送 `main` 会更新滚动测试版；版本标签会创建不可变的正式 Release。
 
 ```bash
 git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-## Build
+本地验证与构建：
 
 ```bash
 python -m rule_tools.build_rules
 python -m unittest discover -s tests -v
+bash tests/runtime_module.sh
 gradle :app:assembleDebug
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.0-core-only.zip
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.0.zip \
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.1-core-only.zip
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.1.zip \
   --manager-apk app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Android builds use JDK 17, Gradle 9.6, AGP 9.2, `compileSdk 36`, `targetSdk 36`, and `minSdk 31`. Configure the signing secrets described in [Rule maintenance](docs/RULE_MAINTENANCE.md) before publishing.
+Android 构建环境：JDK 17、Gradle 9.6、AGP 9.2、`compileSdk 36`、
+`targetSdk 36`、`minSdk 31`。正式发布前需配置
+[规则维护与签名说明](docs/RULE_MAINTENANCE.md)中的签名密钥。
 
-## Limits
-
-Hosts filtering cannot block ads that share a domain with first-party content, use hard-coded IPs, or bypass system DNS through an embedded encrypted-DNS client. ZeroAd does not modify other apps' private data or disable their components.
-
-GPL-3.0. The bundled Wei.G baseline is an offline fallback; live profiles come from the independent rules repository.
+</details>

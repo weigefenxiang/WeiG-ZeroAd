@@ -2,6 +2,8 @@ package com.weig.rootad;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -21,6 +23,7 @@ import android.view.WindowInsetsController;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -35,6 +38,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
+    private static final String UI_PREFERENCES = "zeroad-ui";
+    private static final String THEME_OVERRIDE = "theme-override";
+    private static final int THEME_SYSTEM = 0;
+    private static final int THEME_LIGHT = 1;
+    private static final int THEME_DARK = 2;
+
     private record UpdateCheck(
             RuleUpdater.Available rules,
             CodeUpdater.Available code,
@@ -46,6 +55,7 @@ public final class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean zh;
     private int surface, card, primary, secondary, accent, accentSoft, divider;
+    private int updateAvailable, updateUnavailable, updateError;
     private TextView protectionText, countText, detailText, updateText;
     private TextView actionText, rewardCountdown;
     private ProgressBar progress, actionProgress;
@@ -67,12 +77,16 @@ public final class MainActivity extends Activity {
     };
 
     @Override public void onCreate(Bundle state) {
+        applyThemeOverride();
         super.onCreate(state);
         zh = Locale.getDefault().getLanguage().equals("zh");
         surface = getColor(R.color.surface); card = getColor(R.color.surface_card);
         primary = getColor(R.color.text_primary); secondary = getColor(R.color.text_secondary);
         accent = getColor(R.color.accent); accentSoft = getColor(R.color.accent_soft);
         divider = getColor(R.color.divider);
+        updateAvailable = getColor(R.color.update_available);
+        updateUnavailable = getColor(R.color.update_unavailable);
+        updateError = getColor(R.color.update_error);
         boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
         getWindow().setDecorFitsSystemWindows(false);
@@ -98,6 +112,34 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private void applyThemeOverride() {
+        int mode = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE)
+                .getInt(THEME_OVERRIDE, THEME_SYSTEM);
+        if (mode == THEME_SYSTEM) return;
+        Configuration override = new Configuration();
+        override.uiMode = mode == THEME_DARK
+                ? Configuration.UI_MODE_NIGHT_YES
+                : Configuration.UI_MODE_NIGHT_NO;
+        applyOverrideConfiguration(override);
+    }
+
+    private void toggleTheme() {
+        boolean dark = (getResources().getConfiguration().uiMode &
+                Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
+                .putInt(THEME_OVERRIDE, dark ? THEME_LIGHT : THEME_DARK)
+                .apply();
+        recreate();
+    }
+
+    private void followSystemTheme() {
+        getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
+                .remove(THEME_OVERRIDE)
+                .apply();
+        toast(t("已恢复跟随系统", "Following system theme"));
+        recreate();
+    }
+
     private View buildScreen() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -113,10 +155,31 @@ public final class MainActivity extends Activity {
         });
         scroll.addView(body);
 
+        LinearLayout header = row();
+        header.setGravity(Gravity.TOP);
+        LinearLayout heading = column();
         TextView brand = text("Wei.G", 14, accent, Typeface.BOLD);
-        body.addView(brand);
+        heading.addView(brand);
         TextView title = text("ZeroAd", 34, primary, Typeface.BOLD);
-        body.addView(title, margins(-2, 2, 0, 20));
+        heading.addView(title, margins(-2, 2, 0, 0));
+        header.addView(heading, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        ImageButton theme = new ImageButton(this);
+        theme.setImageResource(R.drawable.ic_theme);
+        theme.setColorFilter(accent);
+        theme.setBackground(round(accentSoft, 14, divider));
+        theme.setPadding(dp(10), dp(10), dp(10), dp(10));
+        theme.setContentDescription(t("切换白天或黑暗模式", "Toggle light or dark mode"));
+        theme.setTooltipText(theme.getContentDescription());
+        theme.setOnClickListener(view -> toggleTheme());
+        theme.setOnLongClickListener(view -> {
+            followSystemTheme();
+            return true;
+        });
+        LinearLayout.LayoutParams themeLayout = new LinearLayout.LayoutParams(dp(44), dp(44));
+        themeLayout.setMargins(dp(12), 0, 0, 0);
+        header.addView(theme, themeLayout);
+        body.addView(header, margins(0, 0, 0, 20));
 
         LinearLayout hero = card();
         protectionText = text(t("正在检测 Root 核心", "Checking Root core"), 14, secondary, Typeface.BOLD);
@@ -221,9 +284,12 @@ public final class MainActivity extends Activity {
 
         body.addView(section(t("支持与卸载", "Support & removal")));
         LinearLayout support = card();
-        Button issue = button(t("一键提交 GitHub Issue", "Create GitHub issue"), false);
+        Button issue = button(t("问题反馈 · 提交 GitHub Issue", "Report issue · GitHub"), false);
         issue.setOnClickListener(v -> openIssue());
         support.addView(issue);
+        Button logs = button(t("查看运行日志", "View runtime log"), false);
+        logs.setOnClickListener(v -> showRuntimeLog());
+        support.addView(logs, margins(0, 10, 0, 0));
         Button uninstall = button(t("完整卸载", "Complete uninstall"), false);
         uninstall.setTextColor(Color.rgb(210, 55, 60));
         uninstall.setOnClickListener(v -> confirmUninstall());
@@ -246,8 +312,8 @@ public final class MainActivity extends Activity {
     private void showStatus(RootStatus status) {
         latest = status;
         busy(false, null);
-        updateText.setText(t("规则与管理器更新无需重启；只有核心安装或更新后需要重启。",
-                "Rule and app updates need no reboot; only core installation or updates do."));
+        updateText.setText(t("规则与 APK 更新无需重启；只有核心安装或更新后需要重启。",
+                "Rule and APK updates need no reboot; only core installation or updates do."));
         main.removeCallbacks(countdownTick);
         if (status.requiresReboot()) {
             protectionText.setText(t("核心已安装，等待重启", "Core installed; reboot required"));
@@ -422,8 +488,8 @@ public final class MainActivity extends Activity {
                 formatRuleVersion(result.rules().version()) +
                 (rulesNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date"));
         String managerLine = result.code() == null
-                ? t("管理器：检查失败 · ", "Manager: check failed · ") + result.codeError()
-                : t("管理器：", "Manager: ") +
+                ? t("APK：检查失败 · ", "APK: check failed · ") + result.codeError()
+                : t("APK：", "APK: ") +
                 formatCodeVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE) + " → " +
                 formatCodeVersion(result.code().manager().versionName(),
                         result.code().manager().versionCode()) +
@@ -438,15 +504,15 @@ public final class MainActivity extends Activity {
                         result.code().core().versionCode()) +
                 (corePending ? t(" · 等待重启", " · reboot pending") :
                         (coreNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date")));
-        String message = rulesLine + "\n\n" + managerLine + "\n\n" + coreLine + "\n\n" +
-                t("规则立即生效；管理器安装后重新打开；核心重启后生效。",
-                        "Rules apply immediately; reopen the manager after installation; core updates apply after reboot.");
+        String message = rulesLine + "\n\n" + managerLine + "\n\n" + coreLine + "\n\n" + t(
+                "规则立即生效；APK 安装后重新打开；核心重启后生效。",
+                "Rules apply immediately; reopen the APK after installation; core updates apply after reboot.");
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(t("检查更新", "Check for updates"))
                 .setMessage(message)
                 .setPositiveButton(t("更新规则", "Update rules"), null)
-                .setNeutralButton(t("更新管理器", "Update manager"), null)
+                .setNeutralButton(t("更新 APK", "Update APK"), null)
                 .setNegativeButton(t("更新核心", "Update core"), null)
                 .create();
         dialog.setOnShowListener(ignored -> {
@@ -456,6 +522,9 @@ public final class MainActivity extends Activity {
             rulesButton.setEnabled(rulesNew);
             managerButton.setEnabled(managerNew);
             coreButton.setEnabled(coreNew);
+            styleUpdateButton(rulesButton, rulesNew, result.rules() == null);
+            styleUpdateButton(managerButton, managerNew, result.code() == null);
+            styleUpdateButton(coreButton, coreNew, result.code() == null);
             if (rulesNew) rulesButton.setOnClickListener(view -> {
                 dialog.dismiss();
                 installRules(result.rules());
@@ -489,7 +558,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateApp(CodeUpdater.Component manager) {
-        busy(true, t("正在下载并验证管理器…", "Downloading and verifying manager…"));
+        busy(true, t("正在下载并验证 APK…", "Downloading and verifying APK…"));
         worker.execute(() -> {
             try {
                 File file = CodeUpdater.download(this, manager, 80L * 1024 * 1024);
@@ -519,20 +588,122 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void showRuntimeLog() {
+        busy(true, t("正在读取运行日志…", "Reading runtime log…"));
+        worker.execute(() -> {
+            RootShell.Result result = RootShell.runControl("events");
+            main.post(() -> presentRuntimeLog(result));
+        });
+    }
+
+    private void presentRuntimeLog(RootShell.Result result) {
+        busy(false, null);
+        String raw = result.ok() ? result.output() : "";
+        long startedAt = readStartedAt(raw);
+        String events = eventLines(raw);
+        RootStatus status = latest;
+        String summary = t("当前已加载：", "Currently loaded: ") +
+                String.format(Locale.US, "%,d", status == null ? 0 : status.running()) +
+                t(" 条拦截规则", " blocking rules") + "\n" +
+                t("保护运行时间：", "Protection uptime: ") +
+                protectionDuration(startedAt, status != null && status.protection()) +
+                "\n\n" + (result.ok()
+                ? (events.isBlank() ? t("暂无事件记录", "No events recorded") : events)
+                : t("当前核心不支持运行日志，请更新核心并重启。",
+                        "The installed core does not support runtime logs. Update it and reboot."));
+        TextView content = text(summary, 12, primary, Typeface.NORMAL);
+        content.setTypeface(Typeface.MONOSPACE);
+        content.setTextIsSelectable(true);
+        content.setPadding(dp(18), dp(8), dp(18), dp(8));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        new AlertDialog.Builder(this)
+                .setTitle(t("运行日志", "Runtime log"))
+                .setView(scroll)
+                .setPositiveButton(t("复制日志", "Copy log"), (dialog, which) -> {
+                    ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                    clipboard.setPrimaryClip(ClipData.newPlainText("WeiG ZeroAd log", summary));
+                    toast(t("日志已复制", "Log copied"));
+                })
+                .setNegativeButton(t("关闭", "Close"), null)
+                .show();
+    }
+
     private void openIssue() {
+        busy(true, t("正在准备安全诊断…", "Preparing safe diagnostics…"));
+        worker.execute(() -> {
+            RootShell.Result events = RootShell.runControl("events");
+            String recent = events.ok() ? recentEventLines(events.output(), 8) : "";
+            main.post(() -> launchIssue(recent));
+        });
+    }
+
+    private void launchIssue(String recentEvents) {
+        busy(false, null);
         RootStatus status = latest;
         String title = "[Rule] ";
-        String body = "## Description / 问题描述\n\n\n## Safe diagnostics\n" +
-                "- App: " + BuildConfig.VERSION_NAME + "\n- Android: " + android.os.Build.VERSION.RELEASE +
+        String body = "## 问题描述 / Description\n\n\n## 安全诊断 / Safe diagnostics\n" +
+                "- APK: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")" +
+                "\n- Android: " + android.os.Build.VERSION.RELEASE +
                 "\n- Device: " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL +
-                (status == null ? "" : "\n- Root: " + status.root() + "\n- Rule version: " + status.ruleVersion() +
+                (status == null ? "" : "\n- Root: " + status.root() +
+                        "\n- Core: " + status.coreVersion() + " (" + status.coreVersionCode() + ")" +
+                        "\n- Rule version: " + status.ruleVersion() +
                         "\n- Domestic profile: " + status.cnProfile() +
                         "\n- Global profile: " + status.globalProfile() +
-                        "\n- Running rules: " + status.running()) +
-                "\n\nDo not attach account tokens, cookies, or full HTTPS payloads.";
+                        "\n- Running rules: " + status.running() +
+                        "\n- Protection: " + status.protection()) +
+                (recentEvents.isBlank() ? "" :
+                        "\n\n## 最近事件 / Recent events\n```\n" + recentEvents + "\n```") +
+                "\n\n请勿附加账号令牌、Cookie 或完整 HTTPS 数据。" +
+                "\nDo not attach account tokens, cookies, or full HTTPS payloads.";
         String url = "https://github.com/" + BuildConfig.GITHUB_OWNER + "/" + BuildConfig.CODE_REPOSITORY +
                 "/issues/new?title=" + encode(title) + "&body=" + encode(body);
         startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+    }
+
+    private long readStartedAt(String output) {
+        for (String line : output.split("\\R")) {
+            if (!line.startsWith("started_at=")) continue;
+            try { return Long.parseLong(line.substring("started_at=".length())); }
+            catch (NumberFormatException ignored) { return 0; }
+        }
+        return 0;
+    }
+
+    private String eventLines(String output) {
+        StringBuilder value = new StringBuilder();
+        for (String line : output.split("\\R")) {
+            if (line.isBlank() || line.startsWith("started_at=")) continue;
+            if (!value.isEmpty()) value.append('\n');
+            value.append(line);
+        }
+        return value.toString();
+    }
+
+    private String recentEventLines(String output, int maximumLines) {
+        String events = eventLines(output);
+        if (events.isBlank()) return "";
+        String[] lines = events.split("\\R");
+        int first = Math.max(0, lines.length - maximumLines);
+        StringBuilder value = new StringBuilder();
+        for (int index = first; index < lines.length; index++) {
+            if (!value.isEmpty()) value.append('\n');
+            value.append(lines[index]);
+        }
+        return value.toString();
+    }
+
+    private String protectionDuration(long startedAt, boolean enabled) {
+        if (!enabled) return t("未运行", "not running");
+        if (startedAt <= 0) return t("未知", "unknown");
+        long seconds = Math.max(0, System.currentTimeMillis() / 1000L - startedAt);
+        long days = seconds / 86400;
+        long hours = (seconds % 86400) / 3600;
+        long minutes = (seconds % 3600) / 60;
+        if (days > 0) return days + t(" 天 ", "d ") + hours + t(" 小时", "h");
+        if (hours > 0) return hours + t(" 小时 ", "h ") + minutes + t(" 分钟", "m");
+        return minutes + t(" 分钟", "m");
     }
 
     private void confirmUninstall() {
@@ -582,6 +753,10 @@ public final class MainActivity extends Activity {
     }
     private String formatCodeVersion(String name, int code) {
         return name + " (" + code + ")";
+    }
+    private void styleUpdateButton(Button button, boolean available, boolean failed) {
+        button.setTextColor(available ? updateAvailable :
+                (failed ? updateError : updateUnavailable));
     }
     private void busy(boolean value, String message) {
         progress.setVisibility(value ? View.VISIBLE : View.GONE);
