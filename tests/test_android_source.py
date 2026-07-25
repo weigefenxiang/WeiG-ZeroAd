@@ -108,9 +108,13 @@ class AndroidStartupSourceTests(unittest.TestCase):
 
     def test_readme_is_chinese_first_and_hides_git_publish_details(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        english = (ROOT / "README.en.md").read_text(encoding="utf-8")
         self.assertIn("## 主要功能", readme)
+        self.assertIn("[English](README.en.md)", readme)
         self.assertIn("<summary>开发者：直接从 Git 发布</summary>", readme)
-        self.assertLess(readme.index("## 主要功能"), readme.index("<summary>English</summary>"))
+        self.assertNotIn("Wei.G ZeroAd is a lightweight root ad blocker", readme)
+        self.assertIn("Wei.G ZeroAd is a lightweight root ad blocker", english)
+        self.assertFalse((ROOT / "README.zh-CN.md").exists())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # Wei.G ZeroAd
 
+[English](README.en.md)
+
 Wei.G ZeroAd 是面向 Android 12–16 的轻量 Root 去广告工具。原生管理器控制
 systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 
@@ -15,11 +17,11 @@ systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 
 ## 安装
 
-普通用户下载最新的 `WeiG-ZeroAd-vX.Y.Z.zip`，使用 MMRL、Magisk、KernelSU
+普通用户下载正式版 `WeiG-ZeroAd-v0.1.1.zip`，使用 MMRL、Magisk、KernelSU
 或 APatch 安装，然后重启设备。该安装包同时包含核心和管理器。
 
-- `WeiG-ZeroAd-vX.Y.Z-core-only.zip`：仅核心。
-- `WeiG-ZeroAd-Manager-vX.Y.Z.apk`：单独安装或更新 APK。
+- `WeiG-ZeroAd-v0.1.1-core-only.zip`：仅核心。
+- `WeiG-ZeroAd-Manager-v0.1.1.apk`：单独安装或更新 APK。
 
 首次安装核心以及以后更新核心都需要重启。切换过滤模式、更新规则和更新 APK
 不需要重启。
@@ -61,21 +63,6 @@ hosts 无法处理广告与正文共用同一域名、硬编码 IP，或应用�
 [217heidai](https://github.com/217heidai/adblockfilters)
 
 GPL-3.0
-
-<details>
-<summary>English</summary>
-
-Wei.G ZeroAd is a lightweight root ad blocker for Android 12–16. Its native
-manager controls a systemless-hosts core compatible with Magisk, KernelSU, and
-APatch. Domestic and Global profiles are independent, reward-ad packs remain
-separate, and rules, APK, and core can be updated individually.
-
-Download the latest `WeiG-ZeroAd-vX.Y.Z.zip` for the combined core and manager.
-Core installation or updates require a reboot; rule, profile, and APK changes do
-not. Runtime logs contain operational events and rule counts only—never browsing
-domains or HTTPS payloads.
-
-</details>
 
 <details>
 <summary>开发者：直接从 Git 发布</summary>
