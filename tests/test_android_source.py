@@ -136,6 +136,19 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertNotIn("keep-user-rules)", core)
         self.assertNotIn("keep_user_rules", uninstall)
 
+    def test_core_awk_never_receives_multiline_v_assignments(self) -> None:
+        # Toybox awk on Android rejects -v values containing newlines
+        # ("newline in string"); newline-separated lists must use ENVIRON.
+        core = (ROOT / "module/bin/rulectl").read_text(encoding="utf-8")
+        self.assertIn('ENVIRON["COMPOSE_PROFILES"]', core)
+        self.assertIn('ENVIRON["COMPOSE_PACK_ALL"]', core)
+        self.assertIn('ENVIRON["COMPOSE_PACK_ENABLED"]', core)
+        self.assertIn('ENVIRON["CHECK_RELATIONS"]', core)
+        self.assertNotIn("-v profile_list=", core)
+        self.assertNotIn("-v pack_all=", core)
+        self.assertNotIn("-v pack_enabled=", core)
+        self.assertNotIn("-v relations=", core)
+
     def test_support_section_exposes_safe_logs_and_issue_diagnostics(self) -> None:
         activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
             encoding="utf-8"

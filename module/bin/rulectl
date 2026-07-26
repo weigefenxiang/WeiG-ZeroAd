@@ -301,11 +301,13 @@ function load_list(list, kind,   paths, total, i) {
 }
 
 BEGIN {
-  load_list(pack_all, "reward")
-  load_list(pack_enabled, "enabled")
+  # The newline-separated lists arrive via ENVIRON: several Android awk
+  # builds (toybox) reject -v assignments that contain literal newlines.
+  load_list(ENVIRON["COMPOSE_PACK_ALL"], "reward")
+  load_list(ENVIRON["COMPOSE_PACK_ENABLED"], "enabled")
   load(allow_list, "allow")
   load(disabled_list, "disabled")
-  load_list(profile_list, "profile")
+  load_list(ENVIRON["COMPOSE_PROFILES"], "profile")
   if (reward_blocking + 0 == 1) {
     for (i = 1; i <= enabled_count; i++) emit(enabled_order[i])
   }
@@ -324,10 +326,13 @@ BEGIN {
 # compose_rules BODY_PATH STATS_PATH PROFILE_LIST PROTECTION REWARD_BLOCKING
 compose_rules() {
   : > "$1" || fail "cannot create rule output"
-  awk -v body_path="$1" -v stats_path="$2" -v profile_list="$3" \
+  # The multi-line path lists travel through the environment, not -v: toybox
+  # awk rejects -v values with embedded newlines ("newline in string").
+  COMPOSE_PROFILES="$3" \
+  COMPOSE_PACK_ALL="$(all_pack_files)" \
+  COMPOSE_PACK_ENABLED="$(enabled_pack_files)" \
+  awk -v body_path="$1" -v stats_path="$2" \
       -v protection="$4" -v reward_blocking="$5" \
-      -v pack_all="$(all_pack_files)" \
-      -v pack_enabled="$(enabled_pack_files)" \
       -v allow_list="$USER_DIR/allow.txt" \
       -v disabled_list="$USER_DIR/disabled.txt" \
       -v block_list="$USER_DIR/block.txt" \
@@ -411,7 +416,8 @@ function load(path, arr,   line, key, got) {
 
 BEGIN {
   load(parent, base)
-  total = split(relations, items, "\n")
+  # Multi-line, so it arrives via ENVIRON; toybox awk rejects -v newlines.
+  total = split(ENVIRON["CHECK_RELATIONS"], items, "\n")
   for (i = 1; i <= total; i++) {
     if (items[i] == "") continue
     split(items[i], field, "|")
@@ -439,7 +445,7 @@ BEGIN {
 
 # check_relations PARENT_FILE RELATIONS
 check_relations() {
-  violation=$(awk -v parent="$1" -v relations="$2" "$RULE_RELATION_CHECKER") && return 0
+  violation=$(CHECK_RELATIONS="$2" awk -v parent="$1" "$RULE_RELATION_CHECKER") && return 0
   fail "${violation:-rule relation check failed}"
 }
 
