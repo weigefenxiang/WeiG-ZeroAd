@@ -16,7 +16,7 @@ final class RootShell {
     private RootShell() {}
 
     static Result runControl(String arguments) {
-        return run("'" + CONTROL + "' " + arguments);
+        return run(quote(CONTROL) + " " + arguments);
     }
 
     static Result run(String command) {
@@ -27,18 +27,31 @@ final class RootShell {
     private static synchronized boolean supportsMasterMount() {
         if (masterMountSupported == null) {
             Result probe = execute(new String[]{"su", "-mm", "-c", "exit 0"});
-            masterMountSupported = probe.ok();
+            if (probe.ok()) {
+                masterMountSupported = true;
+            } else {
+                // Only a working plain su proves -mm itself is unsupported. A
+                // failed probe while root has not been granted yet must not
+                // stick for the rest of the process lifetime.
+                Result plain = execute(new String[]{"su", "-c", "exit 0"});
+                if (plain.ok()) masterMountSupported = false;
+                else return false;
+            }
         }
         return masterMountSupported;
     }
 
     private static Result execute(String[] command) {
-        StringBuilder output = new StringBuilder();
+        // StringBuffer, not StringBuilder: when join() below times out, the
+        // reader thread may still append while this thread calls toString().
+        StringBuffer output = new StringBuffer();
+        Process process = null;
         try {
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            Process running = process;
             Thread readerThread = new Thread(() -> {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                        process.getInputStream(), StandardCharsets.UTF_8))) {
+                        running.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) output.append(line).append('\n');
                 } catch (Exception ignored) {
@@ -55,6 +68,10 @@ final class RootShell {
             readerThread.join(1_000);
             return new Result(process.exitValue(), output.toString().trim());
         } catch (Exception error) {
+            // Covers the interrupted path too: shutting the worker down while a
+            // command is in flight must not leave an orphaned su process behind.
+            if (process != null) process.destroyForcibly();
+            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
             return new Result(127, error.getMessage() == null ? error.toString() : error.getMessage());
         }
     }

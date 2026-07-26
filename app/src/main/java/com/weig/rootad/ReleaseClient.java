@@ -15,11 +15,14 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 final class ReleaseClient {
     record Asset(String name, String url, long size, String digest) {}
-    record Release(String tag, Asset[] assets) {
+    record Release(String tag, List<Asset> assets) {
         Asset matching(String fragment, String suffix) {
             String part = fragment.toLowerCase(Locale.ROOT);
             String ending = suffix.toLowerCase(Locale.ROOT);
@@ -34,33 +37,39 @@ final class ReleaseClient {
             return null;
         }
     }
+    /** A release together with the asset that made it match, so callers never re-scan. */
+    record Match(Release release, Asset asset) {}
+
+    private static final Pattern UNSAFE_NAME = Pattern.compile("[^A-Za-z0-9._-]");
 
     private ReleaseClient() {}
 
-    static Release latestWithAsset(String repository, String nameFragment, String suffix) throws Exception {
-        String endpoint = "https://api.github.com/repos/" + BuildConfig.GITHUB_OWNER + "/" + repository +
-                "/releases?per_page=30";
-        JSONArray releases = new JSONArray(new String(get(new URL(endpoint), 5_000_000), StandardCharsets.UTF_8));
-        String fragment = nameFragment.toLowerCase(Locale.ROOT);
-        String ending = suffix.toLowerCase(Locale.ROOT);
-        for (int releaseIndex = 0; releaseIndex < releases.length(); releaseIndex++) {
-            JSONObject json = releases.getJSONObject(releaseIndex);
-            if (json.optBoolean("draft") || json.optBoolean("prerelease")) continue;
-            Release release = parseRelease(json);
-            for (Asset asset : release.assets) {
-                String name = asset.name.toLowerCase(Locale.ROOT);
-                if (name.contains(fragment) && name.endsWith(ending)) return release;
-            }
-        }
-        throw new IllegalStateException("No matching GitHub release asset found");
+    static Match latestWithAsset(String repository, String nameFragment, String suffix) throws Exception {
+        Match match = firstRelease(repository, nameFragment, suffix, null);
+        if (match == null) throw new IllegalStateException("No matching GitHub release asset found");
+        return match;
     }
 
-    static Release latestChannelWithAsset(
+    static Match latestChannelWithAsset(
+            String repository, String nameFragment, String suffix, String channel) throws Exception {
+        Match match = firstRelease(repository, nameFragment, suffix, channel);
+        if (match == null) throw new IllegalStateException("No " + channel + " update release found");
+        return match;
+    }
+
+    /**
+     * Returns the newest non-draft release carrying a matching asset, or null.
+     *
+     * A null channel accepts stable releases only. The "test" channel accepts
+     * exactly the rolling {@code test-latest} prerelease; any other channel name
+     * behaves like the stable one.
+     */
+    private static Match firstRelease(
             String repository, String nameFragment, String suffix, String channel) throws Exception {
         String endpoint = "https://api.github.com/repos/" + BuildConfig.GITHUB_OWNER + "/" + repository +
                 "/releases?per_page=30";
         JSONArray releases = new JSONArray(new String(get(new URL(endpoint), 5_000_000), StandardCharsets.UTF_8));
-        boolean test = channel.equals("test");
+        boolean test = "test".equals(channel);
         for (int releaseIndex = 0; releaseIndex < releases.length(); releaseIndex++) {
             JSONObject json = releases.getJSONObject(releaseIndex);
             if (json.optBoolean("draft")) continue;
@@ -68,18 +77,19 @@ final class ReleaseClient {
             if (test ? (!prerelease || !json.optString("tag_name").equals("test-latest")) : prerelease)
                 continue;
             Release release = parseRelease(json);
-            if (release.matching(nameFragment, suffix) != null) return release;
+            Asset asset = release.matching(nameFragment, suffix);
+            if (asset != null) return new Match(release, asset);
         }
-        throw new IllegalStateException("No " + channel + " update release found");
+        return null;
     }
 
     private static Release parseRelease(JSONObject json) throws Exception {
         JSONArray source = json.getJSONArray("assets");
-        Asset[] assets = new Asset[source.length()];
+        List<Asset> assets = new ArrayList<>(source.length());
         for (int index = 0; index < source.length(); index++) {
             JSONObject item = source.getJSONObject(index);
-            assets[index] = new Asset(item.getString("name"), item.getString("browser_download_url"),
-                    item.optLong("size"), item.optString("digest", ""));
+            assets.add(new Asset(item.getString("name"), item.getString("browser_download_url"),
+                    item.optLong("size"), item.optString("digest", "")));
         }
         return new Release(json.getString("tag_name"), assets);
     }
@@ -97,7 +107,7 @@ final class ReleaseClient {
         MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
         try {
             downloadToFile(new URL(asset.url), temporary, maximumBytes, asset.size, sha256);
-            String actual = hex(sha256.digest());
+            String actual = Hex.encode(sha256.digest());
             if (asset.digest.startsWith("sha256:")) {
                 String expected = asset.digest.substring(7).toLowerCase(Locale.ROOT);
                 if (!expected.equals(actual))
@@ -145,8 +155,10 @@ final class ReleaseClient {
 
     private static byte[] get(URL url, long maximumBytes) throws Exception {
         HttpURLConnection connection = open(url);
+        long declared = connection.getContentLengthLong();
+        int initial = declared > 0 && declared <= maximumBytes ? (int) declared : 16 * 1024;
         try (BufferedInputStream input = new BufferedInputStream(connection.getInputStream());
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+             ByteArrayOutputStream output = new ByteArrayOutputStream(initial)) {
             byte[] buffer = new byte[16 * 1024];
             int read;
             long total = 0;
@@ -177,12 +189,6 @@ final class ReleaseClient {
     }
 
     private static String safeName(String value) {
-        return value.replaceAll("[^A-Za-z0-9._-]", "_");
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder value = new StringBuilder(bytes.length * 2);
-        for (byte item : bytes) value.append(String.format(Locale.ROOT, "%02x", item));
-        return value.toString();
+        return UNSAFE_NAME.matcher(value).replaceAll("_");
     }
 }

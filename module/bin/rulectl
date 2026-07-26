@@ -1,7 +1,11 @@
 #!/system/bin/sh
 
-MODDIR=${0%/*}
-MODDIR=${MODDIR%/bin}
+case "$0" in
+  */*) MODDIR=${0%/*}; MODDIR=${MODDIR%/bin} ;;
+  # Invoked via PATH lookup there is no directory to derive; use the
+  # canonical install location.
+  *) MODDIR=/data/adb/modules/weig_rootad ;;
+esac
 DATA_DIR=/data/adb/weig_rootad
 HOSTS_TARGET=/system/etc/hosts
 TEST_MODE=0
@@ -31,34 +35,82 @@ fail() {
   exit 1
 }
 
+# Reads the first line of state file $1 into STATE_VALUE without forking a
+# subshell or an external cat; STATE_VALUE is empty when the file is missing.
+read_state() {
+  STATE_VALUE=
+  IFS= read -r STATE_VALUE 2>/dev/null < "$1"
+}
+
+# Like read_state, but coerces STATE_VALUE to a whole number, falling back to
+# $2 (default 0) when the file is missing, empty or corrupt.
+read_int_state() {
+  read_state "$1"
+  case "$STATE_VALUE" in
+    ''|*[!0-9]*) STATE_VALUE=${2:-0} ;;
+  esac
+}
+
+manifest_version() {
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -n 1
+}
+
 release_lock() {
   [ "${LOCK_HELD:-0}" = "1" ] || return 0
-  rm -rf "$LOCK_DIR"
+  # Remove the lock only while this process still owns it; a breaker that
+  # reclaimed a stale lock must not delete the new owner's directory.
+  read_state "$LOCK_DIR/pid"
+  [ "$STATE_VALUE" = "$$" ] && rm -rf "$LOCK_DIR"
   LOCK_HELD=0
+}
+
+# Removes whatever temporaries were live when the script stopped, then drops
+# the lock. Installed unconditionally before dispatch: __build inherits the
+# lock without calling acquire_lock, yet still creates build temporaries.
+cleanup_on_exit() {
+  [ -z "${BUILD_TMP:-}" ] || rm -rf "$BUILD_TMP"
+  [ -z "${STATS_TMP:-}" ] || rm -f "$STATS_TMP"
+  [ -z "${PENDING_TMP:-}" ] || rm -rf "$PENDING_TMP"
+  release_lock
 }
 
 acquire_lock() {
   [ "${ADSHIELD_LOCK_HELD:-0}" != "1" ] || return 0
   waited=0
+  ownerless=0
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-    owner=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    case "$owner" in
-      ''|*[!0-9]*) rm -rf "$LOCK_DIR"; continue ;;
+    read_state "$LOCK_DIR/pid"
+    case "$STATE_VALUE" in
+      ''|*[!0-9]*)
+        # A fresh lock exists for a moment before its pid file is written.
+        # Reclaim only when it stays ownerless across two consecutive checks,
+        # otherwise a concurrent starter would lose its live lock.
+        ownerless=$((ownerless + 1))
+        if [ "$ownerless" -ge 2 ]; then
+          rm -rf "$LOCK_DIR"
+          ownerless=0
+          continue
+        fi
+        ;;
+      *)
+        ownerless=0
+        if ! kill -0 "$STATE_VALUE" 2>/dev/null; then
+          rm -rf "$LOCK_DIR"
+          continue
+        fi
+        ;;
     esac
-    if ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$LOCK_DIR"
-      continue
-    fi
     [ "$waited" -lt 10 ] || fail "another rule operation is still running"
     sleep 1
     waited=$((waited + 1))
   done
   echo $$ > "$LOCK_DIR/pid"
   LOCK_HELD=1
-  trap release_lock EXIT HUP INT TERM
 }
 
 ensure_state() {
+  # Runs once per process; several commands call this again on their own path.
+  [ "${STATE_READY:-0}" = "1" ] && return 0
   mkdir -p "$STATE_DIR" "$USER_DIR" || fail "cannot create state directory"
   chmod 0700 "$DATA_DIR" "$STATE_DIR" "$USER_DIR" 2>/dev/null
   touch "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE"
@@ -72,26 +124,30 @@ ensure_state() {
     printf '%s\n' reward.tencent reward.wechat reward.short-video reward.other > "$ENABLED_PACKS_STATE"
     touch "$STATE_DIR/profile_schema3"
   fi
-  case "$(cat "$CN_PROFILE_STATE" 2>/dev/null)" in
+  read_state "$CN_PROFILE_STATE"
+  case "$STATE_VALUE" in
     off|lean|balanced|strict) ;;
     *) echo lean > "$CN_PROFILE_STATE" ;;
   esac
-  case "$(cat "$CN_LAST_PROFILE_STATE" 2>/dev/null)" in
+  read_state "$CN_LAST_PROFILE_STATE"
+  case "$STATE_VALUE" in
     lean|balanced|strict) ;;
     *)
-      current_cn=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
-      case "$current_cn" in lean|balanced|strict) echo "$current_cn" > "$CN_LAST_PROFILE_STATE" ;;
+      read_state "$CN_PROFILE_STATE"
+      case "$STATE_VALUE" in lean|balanced|strict) echo "$STATE_VALUE" > "$CN_LAST_PROFILE_STATE" ;;
         *) echo lean > "$CN_LAST_PROFILE_STATE" ;; esac
       ;;
   esac
-  case "$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)" in
+  read_state "$GLOBAL_PROFILE_STATE"
+  case "$STATE_VALUE" in
     off|lean|balanced|strict) ;;
     *) echo off > "$GLOBAL_PROFILE_STATE" ;;
   esac
   [ -s "$PROTECTION_STATE" ] || echo 1 > "$PROTECTION_STATE"
-  if [ "$(cat "$PROTECTION_STATE" 2>/dev/null)" = "1" ]; then
-    started=$(cat "$PROTECTION_STARTED_STATE" 2>/dev/null)
-    case "$started" in ''|*[!0-9]*) date +%s > "$PROTECTION_STARTED_STATE" ;; esac
+  read_state "$PROTECTION_STATE"
+  if [ "$STATE_VALUE" = "1" ]; then
+    read_state "$PROTECTION_STARTED_STATE"
+    case "$STATE_VALUE" in ''|*[!0-9]*) date +%s > "$PROTECTION_STARTED_STATE" ;; esac
   else
     echo 0 > "$PROTECTION_STARTED_STATE"
   fi
@@ -99,21 +155,16 @@ ensure_state() {
   if [ ! -s "$RULE_VERSION_STATE" ]; then
     manifest=$MODDIR/rules/manifest.json
     [ ! -f "$DATA_DIR/rules/current/manifest.json" ] || manifest=$DATA_DIR/rules/current/manifest.json
-    version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$manifest" 2>/dev/null | head -n 1)
+    version=$(manifest_version "$manifest")
     [ -n "$version" ] && echo "$version" > "$RULE_VERSION_STATE"
   fi
   [ -s "$RULE_VERSION_STATE" ] || echo 0 > "$RULE_VERSION_STATE"
+  STATE_READY=1
 }
 
-normalize_domain() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[.]$//'
-}
-
-valid_domain() {
-  printf '%s\n' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-}
-
-profile_path() {
+# Resolves the rule file for profile $1-$2 into PROFILE_PATH without forking;
+# fails when the level is unknown or no backing file exists.
+resolve_profile() {
   current_rules=$DATA_DIR/rules/current
   region=$1
   level=$2
@@ -123,67 +174,164 @@ profile_path() {
   esac
   name=$region-$level.domains
   if [ -f "$current_rules/$name" ]; then
-    printf '%s/%s\n' "$current_rules" "$name"
+    PROFILE_PATH=$current_rules/$name
   elif [ -f "$MODDIR/rules/$name" ]; then
-    printf '%s/rules/%s\n' "$MODDIR" "$name"
+    PROFILE_PATH=$MODDIR/rules/$name
   elif [ "$region" = "cn" ]; then
     # Upgrade-compatible fallback for a core package built before schema 3.
     case "$level" in lean|balanced) fallback=balanced.domains ;; strict) fallback=strict.domains ;; esac
     [ -f "$MODDIR/rules/$fallback" ] || return 1
-    printf '%s/rules/%s\n' "$MODDIR" "$fallback"
+    PROFILE_PATH=$MODDIR/rules/$fallback
   else
     return 1
   fi
 }
 
-pack_file_name() {
+# Resolves the rule file backing pack id $1 into PACK_PATH without forking;
+# fails for unknown pack ids.
+resolve_pack() {
   case "$1" in
-    reward.tencent) echo reward-tencent.domains ;;
-    reward.wechat) echo reward-wechat.domains ;;
-    reward.short-video) echo reward-short-video.domains ;;
-    reward.other) echo reward-other.domains ;;
+    reward.tencent) pack_name=reward-tencent.domains ;;
+    reward.wechat) pack_name=reward-wechat.domains ;;
+    reward.short-video) pack_name=reward-short-video.domains ;;
+    reward.other) pack_name=reward-other.domains ;;
     *) return 1 ;;
   esac
-}
-
-pack_path() {
-  name=$(pack_file_name "$1") || return 1
-  current_rules=$DATA_DIR/rules/current
-  if [ -f "$current_rules/$name" ]; then
-    printf '%s/%s\n' "$current_rules" "$name"
+  if [ -f "$DATA_DIR/rules/current/$pack_name" ]; then
+    PACK_PATH=$DATA_DIR/rules/current/$pack_name
   else
-    printf '%s/rules/%s\n' "$MODDIR" "$name"
+    PACK_PATH=$MODDIR/rules/$pack_name
   fi
 }
 
-write_reward_union() {
-  output=$1
-  raw=$output.raw
-  : > "$raw"
+# Prints the rule files backing every reward pack, one path per line.
+all_pack_files() {
   for pack_id in reward.tencent reward.wechat reward.short-video reward.other; do
-    source=$(pack_path "$pack_id") || continue
-    cat "$source" >> "$raw"
+    resolve_pack "$pack_id" && printf '%s\n' "$PACK_PATH"
   done
-  sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$raw" | awk '!seen[$0]++' > "$output"
-  rm -f "$raw"
 }
 
-write_enabled_reward_union() {
-  output=$1
-  raw=$output.raw
-  : > "$raw"
+# Prints the rule files backing the packs the user has enabled, preserving the
+# order recorded in the state file.
+enabled_pack_files() {
   while IFS= read -r pack_id; do
     [ -n "$pack_id" ] || continue
-    source=$(pack_path "$pack_id") || continue
-    cat "$source" >> "$raw"
+    resolve_pack "$pack_id" || continue
+    printf '%s\n' "$PACK_PATH"
   done < "$ENABLED_PACKS_STATE"
-  sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$raw" | awk '!seen[$0]++' > "$output"
-  rm -f "$raw"
 }
 
 count_domains() {
   [ -f "$1" ] || { echo 0; return; }
   awk '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$1"
+}
+
+# Single-pass rule composer.
+#
+# Reads every input file itself with getline instead of relying on a shell
+# pipeline, so one awk process replaces the eight cat/sed/awk stages this used
+# to take. Only the profile key set is held in memory; the body is streamed to
+# body_path as it is produced.
+#
+# Emission order is the order the previous pipeline produced: profile domains
+# (minus reward domains), then the enabled reward packs, then the user block
+# list, each deduplicated against everything already emitted and filtered
+# through the allow/disabled skip list.
+RULE_COMPOSER='
+function emit(key) {
+  if (protection + 0 != 1) return
+  if (key in skip) return
+  emit_count++
+  print "0.0.0.0 " key > body_path
+}
+
+# A user block entry is redundant when the same domain already reached the
+# output as a profile rule or as an enabled reward rule.
+function already_emitted(key) {
+  if (key in profile_seen && !(key in reward)) return 1
+  if (reward_blocking + 0 == 1 && key in enabled) return 1
+  return 0
+}
+
+function load(path, kind,   line, key) {
+  if (path == "") return
+  while ((getline line < path) > 0) {
+    key = line
+    # Fast path: validated rule files hold one bare domain per line, so the
+    # regex/split work only runs for hand-edited user lists.
+    if (key == "" || substr(key, 1, 1) == "#") continue
+    if (index(key, " ") || index(key, "\t")) {
+      sub(/^[ \t]+/, "", key)
+      if (key == "" || substr(key, 1, 1) == "#") continue
+      sub(/[ \t].*$/, "", key)
+      if (key == "") continue
+    }
+    if (kind == "reward") {
+      reward[key] = 1
+    } else if (kind == "enabled") {
+      if (key in enabled) continue
+      enabled[key] = 1
+      enabled_order[++enabled_count] = key
+    } else if (kind == "allow") {
+      user_allow_count++
+      skip[key] = 1
+    } else if (kind == "disabled") {
+      disabled_count++
+      skip[key] = 1
+    } else if (kind == "profile") {
+      if (key in profile_seen) continue
+      profile_seen[key] = 1
+      if (key in reward) continue
+      compiled_count++
+      emit(key)
+    } else if (kind == "user") {
+      user_block_count++
+      if (key in user_seen) continue
+      user_seen[key] = 1
+      if (already_emitted(key)) continue
+      emit(key)
+    }
+  }
+  close(path)
+}
+
+function load_list(list, kind,   paths, total, i) {
+  total = split(list, paths, "\n")
+  for (i = 1; i <= total; i++) load(paths[i], kind)
+}
+
+BEGIN {
+  load_list(pack_all, "reward")
+  load_list(pack_enabled, "enabled")
+  load(allow_list, "allow")
+  load(disabled_list, "disabled")
+  load_list(profile_list, "profile")
+  if (reward_blocking + 0 == 1) {
+    for (i = 1; i <= enabled_count; i++) emit(enabled_order[i])
+  }
+  load(block_list, "user")
+  close(body_path)
+  print "compiled=" (compiled_count + 0) > stats_path
+  print "running=" (emit_count + 0) > stats_path
+  print "reward_block=" (enabled_count + 0) > stats_path
+  print "disabled=" (disabled_count + 0) > stats_path
+  print "user_block=" (user_block_count + 0) > stats_path
+  print "user_allow=" (user_allow_count + 0) > stats_path
+  close(stats_path)
+}
+'
+
+# compose_rules BODY_PATH STATS_PATH PROFILE_LIST PROTECTION REWARD_BLOCKING
+compose_rules() {
+  : > "$1" || fail "cannot create rule output"
+  awk -v body_path="$1" -v stats_path="$2" -v profile_list="$3" \
+      -v protection="$4" -v reward_blocking="$5" \
+      -v pack_all="$(all_pack_files)" \
+      -v pack_enabled="$(enabled_pack_files)" \
+      -v allow_list="$USER_DIR/allow.txt" \
+      -v disabled_list="$USER_DIR/disabled.txt" \
+      -v block_list="$USER_DIR/block.txt" \
+      "$RULE_COMPOSER" || fail "cannot compose rules"
 }
 
 count_running() {
@@ -192,7 +340,12 @@ count_running() {
 }
 
 log_event() {
-  message=$(printf '%s' "$*" | sed 's/|/-/g')
+  # Internal messages never carry the field separator; only sanitize when one
+  # actually appears instead of forking printf|sed on every event.
+  message=$*
+  case "$message" in
+    *"|"*) message=$(printf '%s' "$message" | sed 's/|/-/g') ;;
+  esac
   printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$EVENT_LOG"
   lines=$(wc -l < "$EVENT_LOG" 2>/dev/null)
   case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
@@ -204,9 +357,8 @@ log_event() {
 
 print_events() {
   ensure_state
-  started=$(cat "$PROTECTION_STARTED_STATE" 2>/dev/null)
-  case "$started" in ''|*[!0-9]*) started=0 ;; esac
-  printf 'started_at=%s\n' "$started"
+  read_int_state "$PROTECTION_STARTED_STATE"
+  printf 'started_at=%s\n' "$STATE_VALUE"
   tail -n 200 "$EVENT_LOG" 2>/dev/null
 }
 
@@ -215,14 +367,80 @@ validate_rule_file() {
   minimum=${2:-1}
   [ -f "$file" ] && [ ! -L "$file" ] || fail "rule file is missing or unsafe"
   size=$(wc -c < "$file" 2>/dev/null)
+  case "$size" in ''|*[!0-9]*) fail "cannot read rule file size" ;; esac
   [ "$size" -le 33554432 ] || fail "rule file is too large"
-  invalid=$(awk '
+  # One pass validates the format and counts the domains together.
+  count=$(awk '
     /^[[:space:]]*(#|$)/ { next }
-    $0 !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/ { print; exit }
-  ' "$file")
-  [ -z "$invalid" ] || fail "rule file contains an invalid domain"
-  count=$(count_domains "$file")
+    $0 !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/ { bad = 1; exit 1 }
+    { count++ }
+    END { if (bad) exit 1; print count + 0 }
+  ' "$file") || fail "rule file contains an invalid domain"
+  case "$count" in ''|*[!0-9]*) fail "rule file contains an invalid domain" ;; esac
   [ "$count" -ge "$minimum" ] && [ "$count" -le 500000 ] || fail "rule count is outside the safe range"
+}
+
+# Loads one rule file into memory and streams the others past it, so each check
+# batch holds a single domain set no matter how many relations it verifies.
+# Every relation is "mode|label|path": subset requires the streamed file to be
+# contained in the loaded one, disjoint requires no shared domain.
+RULE_RELATION_CHECKER='
+function key_of(line,   key) {
+  key = line
+  if (key == "" || substr(key, 1, 1) == "#") return ""
+  if (index(key, " ") || index(key, "\t")) {
+    sub(/^[ \t]+/, "", key)
+    if (key == "" || substr(key, 1, 1) == "#") return ""
+    sub(/[ \t].*$/, "", key)
+  }
+  return key
+}
+
+# getline returns -1 for an unreadable file, which a plain while-loop would
+# treat like EOF and pass the check vacuously; every read error must fail.
+function load(path, arr,   line, key, got) {
+  got = (getline line < path)
+  if (got < 0) { print "cannot read rule file"; exit 1 }
+  while (got > 0) {
+    key = key_of(line)
+    if (key != "") arr[key] = 1
+    got = (getline line < path)
+  }
+  close(path)
+}
+
+BEGIN {
+  load(parent, base)
+  total = split(relations, items, "\n")
+  for (i = 1; i <= total; i++) {
+    if (items[i] == "") continue
+    split(items[i], field, "|")
+    mode = field[1]
+    label = field[2]
+    path = field[3]
+    got = (getline line < path)
+    if (got < 0) { print "cannot read rule file"; exit 1 }
+    while (got > 0) {
+      key = key_of(line)
+      if (key != "") {
+        present = (key in base)
+        if (mode == "subset" ? !present : present) {
+          print label
+          close(path)
+          exit 1
+        }
+      }
+      got = (getline line < path)
+    }
+    close(path)
+  }
+}
+'
+
+# check_relations PARENT_FILE RELATIONS
+check_relations() {
+  violation=$(awk -v parent="$1" -v relations="$2" "$RULE_RELATION_CHECKER") && return 0
+  fail "${violation:-rule relation check failed}"
 }
 
 install_rule_directory() {
@@ -241,90 +459,88 @@ install_rule_directory() {
   for name in manifest.json packs.json; do
     [ -f "$source_dir/$name" ] && [ ! -L "$source_dir/$name" ] || fail "$name is missing"
   done
-  version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$source_dir/manifest.json" | head -n 1)
+  version=$(manifest_version "$source_dir/manifest.json")
   case "$version" in ''|*[!0-9]*) fail "invalid rule version" ;; esac
 
-  missing=$(awk 'NR == FNR { parent[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in parent) { count++ } END { print count + 0 }' \
-    "$source_dir/cn-balanced.domains" "$source_dir/cn-lean.domains")
-  [ "$missing" -eq 0 ] || fail "cn lean is not a subset of balanced"
-  missing=$(awk 'NR == FNR { parent[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in parent) { count++ } END { print count + 0 }' \
-    "$source_dir/cn-strict.domains" "$source_dir/cn-balanced.domains")
-  [ "$missing" -eq 0 ] || fail "cn balanced is not a subset of strict"
-  missing=$(awk 'NR == FNR { parent[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in parent) { count++ } END { print count + 0 }' \
-    "$source_dir/global-balanced.domains" "$source_dir/global-lean.domains")
-  [ "$missing" -eq 0 ] || fail "global lean is not a subset of balanced"
-  missing=$(awk 'NR == FNR { parent[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in parent) { count++ } END { print count + 0 }' \
-    "$source_dir/global-strict.domains" "$source_dir/global-balanced.domains")
-  [ "$missing" -eq 0 ] || fail "global balanced is not a subset of strict"
-  overlap=$(awk 'NR == FNR { cn[$1] = 1; next } !/^[[:space:]]*(#|$)/ && $1 in cn { count++ } END { print count + 0 }' \
-    "$source_dir/cn-strict.domains" "$source_dir/global-strict.domains")
-  [ "$overlap" -eq 0 ] || fail "domestic and global rules overlap"
-  for profile in cn-lean cn-balanced cn-strict global-lean global-balanced global-strict; do
-    overlap=$(awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && $1 in reward { count++ } END { print count + 0 }' \
-      "$source_dir/reward-ads.domains" "$source_dir/$profile.domains")
-    [ "$overlap" -eq 0 ] || fail "reward rules overlap $profile"
-  done
+  # Four batches instead of eleven two-file passes. Checking reward overlap
+  # against the strict profiles alone is sufficient: the subset checks run
+  # first, so lean and balanced cannot contain a domain strict does not.
+  check_relations "$source_dir/cn-balanced.domains" \
+    "subset|cn lean is not a subset of balanced|$source_dir/cn-lean.domains"
+  check_relations "$source_dir/cn-strict.domains" \
+    "subset|cn balanced is not a subset of strict|$source_dir/cn-balanced.domains
+disjoint|domestic and global rules overlap|$source_dir/global-strict.domains
+disjoint|reward rules overlap the domestic profiles|$source_dir/reward-ads.domains"
+  check_relations "$source_dir/global-balanced.domains" \
+    "subset|global lean is not a subset of balanced|$source_dir/global-lean.domains"
+  check_relations "$source_dir/global-strict.domains" \
+    "subset|global balanced is not a subset of strict|$source_dir/global-balanced.domains
+disjoint|reward rules overlap the global profiles|$source_dir/reward-ads.domains"
 
   rules_root=$DATA_DIR/rules
-  pending=$rules_root/.pending.$$
-  old=$rules_root/.old.$$
-  mkdir -p "$pending" || fail "cannot create rule staging area"
+  PENDING_TMP=$rules_root/.pending.$$
+  mkdir -p "$PENDING_TMP" || fail "cannot create rule staging area"
   for name in $RULE_FILES; do
-    cp -f "$source_dir/$name" "$pending/$name" || fail "cannot stage $name"
+    cp -f "$source_dir/$name" "$PENDING_TMP/$name" || fail "cannot stage $name"
   done
-  chmod 0600 "$pending"/* 2>/dev/null
-  old_version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
-  case "$old_version" in ''|*[!0-9]*) old_version=0 ;; esac
-  rm -rf "$old"
-  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$old" ||
-    fail "cannot preserve current rules"
-  if ! mv "$pending" "$rules_root/current"; then
-    [ ! -d "$old" ] || mv "$old" "$rules_root/current"
-    fail "cannot activate rules"
-  fi
-  echo "$version" > "$RULE_VERSION_STATE"
-  if build_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1); then
-    rm -rf "$rules_root/previous"
-    [ ! -d "$old" ] || mv "$old" "$rules_root/previous"
-  else
-    rm -rf "$rules_root/current"
-    [ ! -d "$old" ] || mv "$old" "$rules_root/current"
-    echo "$old_version" > "$RULE_VERSION_STATE"
-    restore_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1) ||
-      fail "new rules failed and previous rules could not be restored: $restore_output"
+  chmod 0600 "$PENDING_TMP"/* 2>/dev/null
+  if ! activate_rules "$PENDING_TMP" "$version" "new rules" "previous rules"; then
+    PENDING_TMP=
     rm -rf "$source_dir"
-    fail "new rules failed; previous rules were restored: $build_output"
+    fail "new rules failed; previous rules were restored: $ACTIVATE_ERROR"
   fi
+  PENDING_TMP=
   rm -rf "$source_dir"
   log_event "rules-installed version=$version"
   status_json
 }
 
+# Swaps NEW_DIR into rules/current, rebuilds, and restores the displaced
+# directory if the rebuild fails. Shared by installs and rollbacks, which differ
+# only in where the incoming directory comes from and how failures are worded.
+#
+# activate_rules NEW_DIR NEW_VERSION LABEL RESTORED_LABEL
+# Returns 1 with $ACTIVATE_ERROR set when the new rules failed but the previous
+# ones were put back; fails outright when the restore itself did not work.
+activate_rules() {
+  new_dir=$1
+  new_version=$2
+  label=$3
+  restored=$4
+  rules_root=$DATA_DIR/rules
+  displaced=$rules_root/.displaced.$$
+  read_int_state "$RULE_VERSION_STATE"
+  old_version=$STATE_VALUE
+
+  rm -rf "$displaced"
+  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$displaced" ||
+    fail "cannot preserve current rules"
+  if ! mv "$new_dir" "$rules_root/current"; then
+    [ ! -d "$displaced" ] || mv "$displaced" "$rules_root/current"
+    fail "cannot activate rules"
+  fi
+  echo "$new_version" > "$RULE_VERSION_STATE"
+  if build_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1); then
+    rm -rf "$rules_root/previous"
+    [ ! -d "$displaced" ] || mv "$displaced" "$rules_root/previous"
+    return 0
+  fi
+  rm -rf "$rules_root/current"
+  [ ! -d "$displaced" ] || mv "$displaced" "$rules_root/current"
+  echo "$old_version" > "$RULE_VERSION_STATE"
+  restore_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1) ||
+    fail "$label failed and $restored could not be restored: $restore_output"
+  ACTIVATE_ERROR=$build_output
+  return 1
+}
+
 rollback_rules() {
   rules_root=$DATA_DIR/rules
   [ -d "$rules_root/previous" ] || fail "no previous rule version is available"
-  rollback=$rules_root/.rollback-current.$$
-  old_version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
-  case "$old_version" in ''|*[!0-9]*) old_version=0 ;; esac
-  rm -rf "$rollback"
-  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$rollback" ||
-    fail "cannot preserve current rules"
-  if ! mv "$rules_root/previous" "$rules_root/current"; then
-    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/current"
-    fail "cannot restore previous rules"
-  fi
-  version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$rules_root/current/manifest.json" | head -n 1)
+  version=$(manifest_version "$rules_root/previous/manifest.json")
   case "$version" in ''|*[!0-9]*) version=0 ;; esac
-  echo "$version" > "$RULE_VERSION_STATE"
-  if build_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1); then
-    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/previous"
-  else
-    rm -rf "$rules_root/current"
-    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/current"
-    echo "$old_version" > "$RULE_VERSION_STATE"
-    restore_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1) ||
-      fail "rollback failed and current rules could not be restored: $restore_output"
-    fail "rollback failed; current rules were restored: $build_output"
+  if ! activate_rules "$rules_root/previous" "$version" "rollback" "current rules"; then
+    fail "rollback failed; current rules were restored: $ACTIVATE_ERROR"
   fi
   log_event "rules-rollback version=$version"
   status_json
@@ -355,8 +571,8 @@ ensure_mounted() {
 publish_active() {
   new_file=$1
   if [ -f "$ACTIVE_HOSTS" ]; then
+    # In-place copy: the bind mount pins the inode, so a rename cannot be used.
     cp -f "$new_file" "$ACTIVE_HOSTS" || fail "cannot update active hosts"
-    rm -f "$new_file"
   else
     mv -f "$new_file" "$ACTIVE_HOSTS" || fail "cannot create active hosts"
   fi
@@ -368,60 +584,46 @@ publish_active() {
 
 build_active() {
   ensure_state
-  cn_profile=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
-  global_profile=$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)
+  read_state "$CN_PROFILE_STATE"
+  cn_profile=$STATE_VALUE
+  read_state "$GLOBAL_PROFILE_STATE"
+  global_profile=$STATE_VALUE
   cn_file=
   if [ "$cn_profile" != "off" ]; then
-    cn_file=$(profile_path cn "$cn_profile") || fail "invalid domestic profile state"
+    resolve_profile cn "$cn_profile" || fail "invalid domestic profile state"
+    cn_file=$PROFILE_PATH
     [ -f "$cn_file" ] || fail "domestic profile rules are missing: $cn_profile"
   fi
   global_file=
   if [ "$global_profile" != "off" ]; then
-    global_file=$(profile_path global "$global_profile") || fail "global profile is not installed: $global_profile"
+    resolve_profile global "$global_profile" || fail "global profile is not installed: $global_profile"
+    global_file=$PROFILE_PATH
     [ -f "$global_file" ] || fail "global profile rules are missing: $global_profile"
   fi
 
-  tmp_dir=$STATE_DIR/.build.$$
-  mkdir -p "$tmp_dir" || fail "cannot create temporary directory"
-  skip_file=$tmp_dir/skip
-  reward_file=$tmp_dir/reward
-  enabled_reward_file=$tmp_dir/enabled-reward
-  base_file=$tmp_dir/base
-  pack_file=$tmp_dir/packs
-  block_file=$tmp_dir/block
-  filtered_file=$tmp_dir/filtered
-  output_file=$tmp_dir/active.hosts
+  BUILD_TMP=$STATE_DIR/.build.$$
+  mkdir -p "$BUILD_TMP" || fail "cannot create temporary directory"
+  body_file=$BUILD_TMP/body
+  stats_file=$BUILD_TMP/stats
+  output_file=$BUILD_TMP/active.hosts
 
-  cat "$USER_DIR/allow.txt" "$USER_DIR/disabled.txt" 2>/dev/null | \
-    sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$skip_file"
-  write_reward_union "$reward_file"
-  write_enabled_reward_union "$enabled_reward_file"
-  {
-    [ -z "$cn_file" ] || cat "$cn_file"
-    [ -z "$global_file" ] || cat "$global_file"
-  } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$tmp_dir/profiles"
-  awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { print $1 }' \
-    "$reward_file" "$tmp_dir/profiles" > "$base_file"
-  : > "$pack_file"
-  now=$(date +%s)
-  reward_until=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
-  case "$reward_until" in ''|*[!0-9]*) reward_until=0 ;; esac
-  if [ "$reward_until" -le "$now" ]; then
-    cp -f "$enabled_reward_file" "$pack_file"
-  fi
-  cat "$base_file" "$pack_file" "$USER_DIR/block.txt" 2>/dev/null | \
-    sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$block_file"
-  awk 'FILENAME == ARGV[1] { skip[$1] = 1; next } !($1 in skip) { print $1 }' \
-    "$skip_file" "$block_file" > "$filtered_file"
+  protection=0
+  read_state "$PROTECTION_STATE"
+  [ "$STATE_VALUE" != "1" ] || protection=1
+  read_int_state "$REWARD_UNTIL_STATE"
+  reward_until=$STATE_VALUE
+  reward_blocking=0
+  [ "$reward_until" -gt "$(date +%s)" ] || reward_blocking=1
 
-  if [ "$(cat "$PROTECTION_STATE" 2>/dev/null)" = "0" ]; then
-    : > "$filtered_file"
-  fi
+  compose_rules "$body_file" "$stats_file" "$cn_file
+$global_file" "$protection" "$reward_blocking"
 
-  compiled=$(count_domains "$base_file")
-  running=$(count_domains "$filtered_file")
-  reward_block=$(count_domains "$enabled_reward_file")
-  version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
+  running=
+  while IFS='=' read -r key value; do
+    [ "$key" = "running" ] && running=$value
+  done 2>/dev/null < "$stats_file"
+  read_state "$RULE_VERSION_STATE"
+  version=$STATE_VALUE
   {
     echo "# WeiG ZeroAd active hosts. Managed by rulectl."
     echo "# cn_profile=$cn_profile"
@@ -430,18 +632,14 @@ build_active() {
     echo "# rule_count=$running"
     echo "127.0.0.1 localhost"
     echo "::1 localhost ip6-localhost ip6-loopback"
-    awk '{ print "0.0.0.0 " $1 }' "$filtered_file"
+    cat "$body_file"
   } > "$output_file" || fail "cannot build active hosts"
 
   publish_active "$output_file"
-  stats_tmp=$ACTIVE_STATS.$$
-  {
-    echo "compiled=$compiled"
-    echo "running=$running"
-    echo "reward_block=$reward_block"
-  } > "$stats_tmp" && mv -f "$stats_tmp" "$ACTIVE_STATS"
+  mv -f "$stats_file" "$ACTIVE_STATS" || fail "cannot record rule statistics"
   chmod 0600 "$ACTIVE_STATS" 2>/dev/null
-  rm -rf "$tmp_dir"
+  rm -rf "$BUILD_TMP"
+  BUILD_TMP=
   log_event "applied cn=$cn_profile global=$global_profile running=$running"
 }
 
@@ -449,8 +647,14 @@ list_add() {
   list=$1
   domain=$2
   tmp=$list.$$
-  { cat "$list" 2>/dev/null; echo "$domain"; } | \
-    sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$tmp" || fail "cannot update rule list"
+  # Single pass: drop comments and blanks, keep the first occurrence of every
+  # line, and append the new domain only when it was not already present.
+  awk -v domain="$domain" '
+    /^[[:space:]]*(#|$)/ { next }
+    seen[$0]++ { next }
+    { print }
+    END { if (domain != "" && !(domain in seen)) print domain }
+  ' "$list" 2>/dev/null > "$tmp" || { rm -f "$tmp"; fail "cannot update rule list"; }
   mv -f "$tmp" "$list" || fail "cannot save rule list"
   chmod 0600 "$list" 2>/dev/null
 }
@@ -458,16 +662,31 @@ list_add() {
 list_remove() {
   list=$1
   domain=$2
+  [ -f "$list" ] || return 0
   tmp=$list.$$
-  awk -v domain="$domain" '$0 != domain { print }' "$list" 2>/dev/null > "$tmp"
+  # The write must succeed before the original is replaced; moving a truncated
+  # temp file over the list would silently destroy the user's entries.
+  awk -v domain="$domain" '$0 != domain { print }' "$list" 2>/dev/null > "$tmp" ||
+    { rm -f "$tmp"; fail "cannot update rule list"; }
   mv -f "$tmp" "$list" || fail "cannot save rule list"
   chmod 0600 "$list" 2>/dev/null
 }
 
 domain_argument() {
   [ -n "$1" ] || fail "domain is required"
-  domain=$(normalize_domain "$1")
-  valid_domain "$domain" || fail "invalid exact domain: $1"
+  # One awk call lower-cases, strips a trailing dot and validates, replacing
+  # the five processes the tr/sed/grep pipeline used to spawn.
+  domain=$(printf '%s\n' "$1" | awk '
+    NR == 1 {
+      d = tolower($0)
+      sub(/\.$/, "", d)
+      if (d !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/) exit 1
+      print d
+      ok = 1
+      exit
+    }
+    END { if (!ok) exit 1 }
+  ') || fail "invalid exact domain: $1"
   printf '%s\n' "$domain"
 }
 
@@ -477,14 +696,17 @@ set_profile() {
   case "$region" in
     cn)
       if [ "$new_profile" = "off" ]; then
-        current=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
-        case "$current" in lean|balanced|strict) echo "$current" > "$CN_LAST_PROFILE_STATE" ;; esac
+        read_state "$CN_PROFILE_STATE"
+        case "$STATE_VALUE" in lean|balanced|strict) echo "$STATE_VALUE" > "$CN_LAST_PROFILE_STATE" ;; esac
         echo off > "$CN_PROFILE_STATE"
       else
-        [ "$new_profile" != "on" ] || new_profile=$(cat "$CN_LAST_PROFILE_STATE" 2>/dev/null)
+        if [ "$new_profile" = "on" ]; then
+          read_state "$CN_LAST_PROFILE_STATE"
+          new_profile=$STATE_VALUE
+        fi
         case "$new_profile" in lean|balanced|strict) ;;
           *) new_profile=lean ;; esac
-        profile_path cn "$new_profile" >/dev/null || fail "unknown domestic profile: $new_profile"
+        resolve_profile cn "$new_profile" || fail "unknown domestic profile: $new_profile"
         echo "$new_profile" > "$CN_PROFILE_STATE"
         echo "$new_profile" > "$CN_LAST_PROFILE_STATE"
       fi
@@ -493,7 +715,7 @@ set_profile() {
       if [ "$new_profile" = "off" ]; then
         echo off > "$GLOBAL_PROFILE_STATE"
       else
-        profile_path global "$new_profile" >/dev/null || fail "global profile is not installed: $new_profile"
+        resolve_profile global "$new_profile" || fail "global profile is not installed: $new_profile"
         echo "$new_profile" > "$GLOBAL_PROFILE_STATE"
       fi
       ;;
@@ -505,8 +727,8 @@ set_profile() {
 set_pack() {
   action=$1
   pack_id=$2
-  source=$(pack_path "$pack_id") || fail "unknown rule pack: $pack_id"
-  [ -f "$source" ] || fail "rule pack is not installed: $pack_id"
+  resolve_pack "$pack_id" || fail "unknown rule pack: $pack_id"
+  [ -f "$PACK_PATH" ] || fail "rule pack is not installed: $pack_id"
   if [ "$action" = "enable" ]; then
     list_add "$ENABLED_PACKS_STATE" "$pack_id"
   else
@@ -539,8 +761,8 @@ start_reward_timer() {
 expire_reward() {
   expected=$1
   ensure_state
-  actual=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
-  case "$actual" in ''|*[!0-9]*) actual=0 ;; esac
+  read_int_state "$REWARD_UNTIL_STATE"
+  actual=$STATE_VALUE
   [ "$expected" = "$actual" ] || return 0
   [ "$actual" -gt 0 ] || return 0
   echo 0 > "$REWARD_UNTIL_STATE"
@@ -549,8 +771,8 @@ expire_reward() {
 }
 
 resume_reward_timer() {
-  expires=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
-  case "$expires" in ''|*[!0-9]*) expires=0 ;; esac
+  read_int_state "$REWARD_UNTIL_STATE"
+  expires=$STATE_VALUE
   now=$(date +%s)
   if [ "$expires" -le "$now" ]; then
     expire_reward "$expires"
@@ -565,51 +787,64 @@ resume_reward_timer() {
 
 status_json() {
   ensure_state
-  cn_profile=$(cat "$CN_PROFILE_STATE" 2>/dev/null)
-  global_profile=$(cat "$GLOBAL_PROFILE_STATE" 2>/dev/null)
+  read_state "$CN_PROFILE_STATE"
+  cn_profile=$STATE_VALUE
+  read_state "$GLOBAL_PROFILE_STATE"
+  global_profile=$STATE_VALUE
   cn_file=
-  [ "$cn_profile" = "off" ] || cn_file=$(profile_path cn "$cn_profile" 2>/dev/null)
+  [ "$cn_profile" = "off" ] || { resolve_profile cn "$cn_profile" && cn_file=$PROFILE_PATH; }
   global_file=
-  [ "$global_profile" = "off" ] || global_file=$(profile_path global "$global_profile" 2>/dev/null)
-  compiled=$(sed -n 's/^compiled=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
-  running=$(sed -n 's/^running=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
-  reward_block=$(sed -n 's/^reward_block=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
-  case "$compiled" in ''|*[!0-9]*)
-    reward_all_tmp=$STATE_DIR/.reward-all.$$
-    profile_all_tmp=$STATE_DIR/.profiles-all.$$
-    write_reward_union "$reward_all_tmp"
-    {
-      [ -z "$cn_file" ] || cat "$cn_file" 2>/dev/null
-      [ -z "$global_file" ] || cat "$global_file" 2>/dev/null
-    } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$profile_all_tmp"
-    compiled=$(awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { count++ } END { print count + 0 }' \
-      "$reward_all_tmp" "$profile_all_tmp")
-    rm -f "$reward_all_tmp" "$profile_all_tmp"
-    ;;
-  esac
+  [ "$global_profile" = "off" ] || { resolve_profile global "$global_profile" && global_file=$PROFILE_PATH; }
+  compiled= running= reward_block= disabled= user_block= user_allow=
+  while IFS='=' read -r key value; do
+    case "$key" in
+      compiled) compiled=$value ;;
+      running) running=$value ;;
+      reward_block) reward_block=$value ;;
+      disabled) disabled=$value ;;
+      user_block) user_block=$value ;;
+      user_allow) user_allow=$value ;;
+    esac
+  done 2>/dev/null < "$ACTIVE_STATS"
+  # The stats cache is written in one atomic move, so a bad value in any field
+  # means the whole file is unusable (or predates these fields). Recompute all
+  # of them in one composer pass; it runs with protection off so it never
+  # touches the active mount.
+  stale=0
+  for value in "$compiled" "$reward_block" "$disabled" "$user_block" "$user_allow"; do
+    case "$value" in ''|*[!0-9]*) stale=1 ;; esac
+  done
+  if [ "$stale" = "1" ]; then
+    STATS_TMP=$STATE_DIR/.stats.$$
+    compose_rules /dev/null "$STATS_TMP" "$cn_file
+$global_file" 0 1
+    while IFS='=' read -r key value; do
+      case "$key" in
+        compiled) compiled=$value ;;
+        reward_block) reward_block=$value ;;
+        disabled) disabled=$value ;;
+        user_block) user_block=$value ;;
+        user_allow) user_allow=$value ;;
+      esac
+    done 2>/dev/null < "$STATS_TMP"
+    rm -f "$STATS_TMP"
+    STATS_TMP=
+  fi
   case "$running" in ''|*[!0-9]*) running=$(count_running) ;; esac
-  disabled=$(count_domains "$USER_DIR/disabled.txt")
-  user_block=$(count_domains "$USER_DIR/block.txt")
-  user_allow=$(count_domains "$USER_DIR/allow.txt")
-  version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
-  reward_until=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
-  case "$reward_until" in ''|*[!0-9]*) reward_until=0 ;; esac
+  read_state "$RULE_VERSION_STATE"
+  version=$STATE_VALUE
+  read_int_state "$REWARD_UNTIL_STATE"
+  reward_until=$STATE_VALUE
   now=$(date +%s)
   [ "$reward_until" -gt "$now" ] && reward_active=true || reward_active=false
   enabled_packs=
   while IFS= read -r pack_id; do
     [ -n "$pack_id" ] || continue
-    source=$(pack_path "$pack_id") || continue
+    resolve_pack "$pack_id" || continue
     [ -z "$enabled_packs" ] && enabled_packs=$pack_id || enabled_packs=$enabled_packs,$pack_id
   done < "$ENABLED_PACKS_STATE"
-  case "$reward_block" in ''|*[!0-9]*)
-    pack_tmp=$STATE_DIR/.packs.$$
-    write_enabled_reward_union "$pack_tmp"
-    reward_block=$(count_domains "$pack_tmp")
-    rm -f "$pack_tmp"
-    ;;
-  esac
-  [ "$(cat "$PROTECTION_STATE" 2>/dev/null)" = "1" ] && protection=true || protection=false
+  read_state "$PROTECTION_STATE"
+  [ "$STATE_VALUE" = "1" ] && protection=true || protection=false
   if [ -d /data/adb/modules_update/weig_rootad ] || [ -f /data/adb/modules/weig_rootad/update ]; then
     pending_reboot=true
   else
@@ -621,14 +856,22 @@ status_json() {
   command -v magisk >/dev/null 2>&1 && root_impl=magisk
   command -v ksud >/dev/null 2>&1 && root_impl=kernelsu
   command -v apd >/dev/null 2>&1 && root_impl=apatch
-  core_version=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+-')
-  core_version_code=$(sed -n 's/^versionCode=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1)
+  core_version=
+  core_version_code=
+  while IFS='=' read -r key value; do
+    case "$key" in
+      version) [ -n "$core_version" ] || core_version=$value ;;
+      versionCode) [ -n "$core_version_code" ] || core_version_code=$value ;;
+    esac
+  done 2>/dev/null < "$MODDIR/module.prop"
+  core_version=$(printf '%s' "$core_version" | tr -cd 'A-Za-z0-9._+-')
   case "$core_version_code" in ''|*[!0-9]*) core_version_code=0 ;; esac
   printf '{"schema":3,"pending_reboot":%s,"protection_enabled":%s,"healthy":%s,"root_impl":"%s","core_version":"%s","core_version_code":%s,"cn_profile":"%s","global_profile":"%s","rule_version":%s,"rules_downloaded":%s,"compiled_rules":%s,"running_rules":%s,"disabled_rules":%s,"user_block_rules":%s,"user_allow_rules":%s,"reward_block_rules":%s,"reward_temporarily_allowed":%s,"reward_expires_at":%s,"enabled_packs":"%s"}\n' \
     "$pending_reboot" "$protection" "$healthy" "$root_impl" "$core_version" "$core_version_code" "$cn_profile" "$global_profile" "$version" "$rules_downloaded" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
 }
 
 command=${1:-status}
+trap cleanup_on_exit EXIT HUP INT TERM
 ensure_state
 acquire_lock
 
@@ -672,7 +915,10 @@ case "$command" in
     expire_reward "${2:-0}"
     ;;
   reward-stop)
-    expire_reward "$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)"
+    # Sanitized like every other reader: a corrupt state file must not make
+    # the stop silently miss the string comparison inside expire_reward.
+    read_int_state "$REWARD_UNTIL_STATE"
+    expire_reward "$STATE_VALUE"
     status_json
     ;;
   pack-enable)
@@ -700,39 +946,39 @@ case "$command" in
     status_json
     ;;
   domain-disable)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_add "$USER_DIR/disabled.txt" "$domain"
     build_active
     status_json
     ;;
   domain-enable)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_remove "$USER_DIR/disabled.txt" "$domain"
     build_active
     status_json
     ;;
   allow-add)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_remove "$USER_DIR/block.txt" "$domain"
     list_add "$USER_DIR/allow.txt" "$domain"
     build_active
     status_json
     ;;
   allow-remove)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_remove "$USER_DIR/allow.txt" "$domain"
     build_active
     status_json
     ;;
   block-add)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_remove "$USER_DIR/allow.txt" "$domain"
     list_add "$USER_DIR/block.txt" "$domain"
     build_active
     status_json
     ;;
   block-remove)
-    domain=$(domain_argument "${2:-}")
+    domain=$(domain_argument "${2:-}") || exit 1
     list_remove "$USER_DIR/block.txt" "$domain"
     build_active
     status_json

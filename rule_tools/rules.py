@@ -44,11 +44,14 @@ def normalize_domain(value: str) -> str | None:
     domain = value.strip().lower().rstrip(".")
     if not domain or len(domain) > 253 or not DOMAIN_RE.fullmatch(domain):
         return None
-    try:
-        ipaddress.ip_address(domain)
-        return None
-    except ValueError:
-        pass
+    # Anything DOMAIN_RE accepted can only parse as an IP address when every
+    # label is numeric, so the usual case skips the exception-heavy parse.
+    if domain.replace(".", "").isdigit():
+        try:
+            ipaddress.ip_address(domain)
+            return None
+        except ValueError:
+            pass
     if any(len(label) > 63 for label in domain.split(".")):
         return None
     return domain
@@ -59,10 +62,13 @@ def domains_from_line(line: str) -> set[str]:
     if not stripped or stripped.startswith(("#", "!")):
         return set()
 
-    adblock_match = ADBLOCK_DOMAIN_RE.match(stripped)
-    if adblock_match:
-        domain = normalize_domain(adblock_match.group(1))
-        return {domain} if domain else set()
+    # The anchored AdBlock pattern can only match these prefixes; checking them
+    # first spares the regex engine on the plain-domain lines that dominate.
+    if stripped.startswith(("@@", "||")):
+        adblock_match = ADBLOCK_DOMAIN_RE.match(stripped)
+        if adblock_match:
+            domain = normalize_domain(adblock_match.group(1))
+            return {domain} if domain else set()
 
     tokens = stripped.split()
     if tokens and tokens[0] in BLOCK_IPS:
@@ -82,14 +88,18 @@ def load_domains(path: Path) -> set[str]:
     return domains
 
 
-def write_domains(path: Path, domains: Iterable[str], header: Iterable[str] = ()) -> None:
+def write_domains(path: Path, domains: Iterable[str], header: Iterable[str] = ()) -> str:
+    """Writes the list and returns its SHA-256, hashed without re-reading the file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"# {line}" for line in header]
     lines.extend(sorted(set(domains)))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    content = "\n".join(lines) + "\n"
+    path.write_text(content, encoding="utf-8", newline="\n")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def write_hosts(path: Path, domains: Iterable[str], profile: str, version: int) -> None:
+def write_hosts(path: Path, domains: Iterable[str], profile: str, version: int) -> str:
+    """Writes the hosts file and returns its SHA-256, hashed without re-reading."""
     normalized = sorted(set(domains))
     lines = [
         "# Wei.G ZeroAd generated hosts file. DO NOT EDIT.",
@@ -101,15 +111,9 @@ def write_hosts(path: Path, domains: Iterable[str], profile: str, version: int) 
     ]
     lines.extend(f"0.0.0.0 {domain}" for domain in normalized)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    content = "\n".join(lines) + "\n"
+    path.write_text(content, encoding="utf-8", newline="\n")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def reward_pack_id(domain: str) -> str:
@@ -136,21 +140,21 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
 
     # Reward endpoints are opt-in blocking packs. They must never leak into either
     # base profile, even when a future baseline source adds them again.
-    strict = ((vendor | local_block) - local_allow) - reward
+    combined = vendor | local_block
+    strict = (combined - local_allow) - reward
     # These two files are only an offline compatibility fallback bundled with
-    # the core. The six live profiles come from WeiG-ZeroAd-Rules.
-    balanced = set(strict)
-    profiles = {"strict": strict, "balanced": balanced}
+    # the core; balanced deliberately mirrors strict. The six live profiles
+    # come from WeiG-ZeroAd-Rules.
+    profiles = {"strict": strict, "balanced": strict}
 
-    if strict & reward or balanced & reward:
+    if strict & reward:
         raise ValueError("reward domains must be disjoint from strict and balanced")
-    if not balanced <= strict:
-        raise ValueError("balanced profile must be a subset of strict")
 
     generated = rules / "generated"
     generated.mkdir(parents=True, exist_ok=True)
+    profile_hashes: dict[str, tuple[str, str]] = {}
     for name, domains in profiles.items():
-        write_domains(
+        domains_sha256 = write_domains(
             generated / f"{name}.domains",
             domains,
             header=(
@@ -160,13 +164,10 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
                 f"rule_count={len(domains)}",
             ),
         )
-        write_hosts(generated / f"{name}.hosts", domains, name, version)
+        hosts_sha256 = write_hosts(generated / f"{name}.hosts", domains, name, version)
+        profile_hashes[name] = (domains_sha256, hosts_sha256)
 
-    stale_reward_hosts = generated / "reward.hosts"
-    if stale_reward_hosts.exists():
-        stale_reward_hosts.unlink()
-
-    write_domains(
+    reward_sha256 = write_domains(
         generated / "reward.domains",
         reward,
         header=(
@@ -179,36 +180,18 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
     reward_pack_sets: dict[str, set[str]] = {pack["id"]: set() for pack in REWARD_PACKS}
     for domain in reward:
         reward_pack_sets[reward_pack_id(domain)].add(domain)
+    pack_hashes: dict[str, str] = {}
     for pack in REWARD_PACKS:
-        domains = reward_pack_sets[pack["id"]]
-        write_domains(
+        pack_hashes[pack["id"]] = write_domains(
             generated / pack["file"],
-            domains,
+            reward_pack_sets[pack["id"]],
             header=(
                 "Optional reward-ad blocking pack; enabled by default.",
                 f"pack_id={pack['id']}",
                 f"rule_version={version}",
-                f"rule_count={len(domains)}",
+                f"rule_count={len(reward_pack_sets[pack['id']])}",
             ),
         )
-
-    all_domains = sorted(strict | reward)
-    index_lines = ["domain\tstrict\tbalanced\treward_block\tsource"]
-    for domain in all_domains:
-        index_lines.append(
-            "\t".join(
-                (
-                    domain,
-                    "1" if domain in strict else "0",
-                    "1" if domain in balanced else "0",
-                    "1" if domain in reward else "0",
-                    "Wei.G" if domain in vendor or domain in reward else "local",
-                )
-            )
-        )
-    (generated / "index.tsv").write_text(
-        "\n".join(index_lines) + "\n", encoding="utf-8", newline="\n"
-    )
 
     manifest = {
         "schema": 2,
@@ -218,12 +201,15 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
                 "rules": len(domains),
                 "domains_file": f"{name}.domains",
                 "hosts_file": f"{name}.hosts",
+                "domains_sha256": profile_hashes[name][0],
+                "hosts_sha256": profile_hashes[name][1],
             }
             for name, domains in profiles.items()
         },
         "reward": {
             "rules": len(reward),
             "domains_file": "reward.domains",
+            "domains_sha256": reward_sha256,
         },
         "packs": [
             {
@@ -234,14 +220,15 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
                 "title_zh": pack["title_zh"],
                 "rules": len(reward_pack_sets[pack["id"]]),
                 "default_enabled": True,
+                "domains_sha256": pack_hashes[pack["id"]],
             }
             for pack in REWARD_PACKS
         ],
         "build": {
             "vendor_rules": len(vendor),
-            "reward_removed_from_strict": len((vendor | local_block) & reward),
+            "reward_removed_from_strict": len(combined & reward),
             "strict_reward_overlap": len(strict & reward),
-            "balanced_reward_overlap": len(balanced & reward),
+            "balanced_reward_overlap": len(strict & reward),
         },
         "manual_rule_control": True,
         "reward_default_enabled": True,
@@ -261,23 +248,6 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
             "enabled_packs",
         ],
     }
-    manifest_path = generated / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-
-    for name in profiles:
-        manifest["profiles"][name]["domains_sha256"] = sha256_file(
-            generated / f"{name}.domains"
-        )
-        manifest["profiles"][name]["hosts_sha256"] = sha256_file(
-            generated / f"{name}.hosts"
-        )
-    manifest["reward"]["domains_sha256"] = sha256_file(generated / "reward.domains")
-    for pack in manifest["packs"]:
-        pack["domains_sha256"] = sha256_file(generated / pack["file"])
 
     (generated / "packs.json").write_text(
         json.dumps({"schema": 1, "version": version, "packs": manifest["packs"]},
@@ -285,7 +255,7 @@ def compile_profiles(root: Path, version: int) -> dict[str, set[str]]:
         encoding="utf-8",
         newline="\n",
     )
-    manifest_path.write_text(
+    (generated / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",

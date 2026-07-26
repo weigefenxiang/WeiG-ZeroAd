@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 final class CrashLog {
     private static final String FILE_NAME = "manager-crashes.log";
@@ -23,6 +24,16 @@ final class CrashLog {
     private static final int MAX_STACK_FRAMES = 18;
     private static final int MAX_RECORD_CHARS = 6000;
     private static final int MAX_ISSUE_CHARS = 3500;
+    // Compiled once: sanitize() runs several times per crash inside the
+    // uncaught-exception handler, where the process is already dying.
+    private static final Pattern URL_RE = Pattern.compile("(?i)https?://\\S+");
+    private static final Pattern DOMAIN_RE =
+            Pattern.compile("(?i)\\b(?:[a-z0-9-]+\\.)+[a-z]{2,63}\\b");
+    private static final Pattern PATH_RE = Pattern.compile("(?i)/(?:data|storage)/\\S+");
+    private static final Pattern SECRET_RE =
+            Pattern.compile("(?i)(authorization|cookie|token)(\\s*[:=]\\s*)\\S+");
+    private static final Pattern WHITESPACE_RE = Pattern.compile("[\\r\\n\\t]+");
+    private static final Pattern RECORD_SPLIT_RE = Pattern.compile("(?m)(?=^=== manager crash )");
     private static boolean installed;
 
     private CrashLog() {}
@@ -63,7 +74,7 @@ final class CrashLog {
             Context context, Thread thread, Throwable error) throws Exception {
         String existing = read(context);
         List<String> records = new ArrayList<>();
-        for (String part : existing.split("(?m)(?=^=== manager crash )")) {
+        for (String part : RECORD_SPLIT_RE.split(existing)) {
             if (!part.isBlank()) records.add(part.trim());
         }
         while (records.size() >= MAX_RECORDS) records.remove(0);
@@ -112,15 +123,12 @@ final class CrashLog {
 
     private static String sanitize(String value) {
         if (value == null) return "";
-        String safe = value
-                .replaceAll("(?i)https?://\\S+", "<url>")
-                .replaceAll("(?i)\\b(?:[a-z0-9-]+\\.)+[a-z]{2,63}\\b", "<domain>")
-                .replaceAll("(?i)/(?:data|storage)/\\S+", "<path>")
-                .replaceAll(
-                        "(?i)(authorization|cookie|token)(\\s*[:=]\\s*)\\S+",
-                        "$1$2<redacted>")
-                .replaceAll("[\\r\\n\\t]+", " ")
-                .trim();
+        String safe = value;
+        safe = URL_RE.matcher(safe).replaceAll("<url>");
+        safe = DOMAIN_RE.matcher(safe).replaceAll("<domain>");
+        safe = PATH_RE.matcher(safe).replaceAll("<path>");
+        safe = SECRET_RE.matcher(safe).replaceAll("$1$2<redacted>");
+        safe = WHITESPACE_RE.matcher(safe).replaceAll(" ").trim();
         return safe.length() <= 240 ? safe : safe.substring(0, 240) + "…";
     }
 

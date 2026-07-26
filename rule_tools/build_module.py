@@ -4,12 +4,13 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
 import zipfile
 from pathlib import Path
+
+from rule_tools.rules import DOMAIN_RE
 
 
 TEXT_SUFFIXES = {".sh", ".prop", ".txt", ".hosts", ".domains", ".json"}
@@ -29,10 +30,6 @@ LIVE_RUNTIME_FILES = tuple(f"{name}.domains" for name in PROFILE_NAMES) + REWARD
 LIVE_RELEASE_FILES = set(LIVE_RUNTIME_FILES) | {
     *(f"{name}.hosts" for name in PROFILE_NAMES), "health-summary.json",
 }
-DOMAIN_RE = re.compile(
-    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
-)
 
 
 def file_sha256(path: Path) -> str:
@@ -42,8 +39,10 @@ def file_sha256(path: Path) -> str:
 def normalize_text_files(root: Path) -> None:
     for path in root.rglob("*"):
         if path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name == "update-binary"):
-            data = path.read_bytes().replace(b"\r\n", b"\n")
-            path.write_bytes(data)
+            data = path.read_bytes()
+            normalized = data.replace(b"\r\n", b"\n")
+            if normalized != data:
+                path.write_bytes(normalized)
 
 
 def exact_domains(data: bytes, name: str) -> set[str]:
@@ -198,7 +197,8 @@ def build(
     module = root / "module"
     generated = root / "rules/generated"
     required = [generated / name for name in (
-        "strict.domains", "balanced.domains", "reward.domains", "manifest.json", "packs.json",
+        "strict.domains", "balanced.domains", "strict.hosts", "reward.domains",
+        "manifest.json", "packs.json",
         "reward-tencent.domains", "reward-wechat.domains", "reward-short-video.domains",
         "reward-other.domains",
     )]
@@ -210,7 +210,6 @@ def build(
         staging = Path(temp_dir) / "module"
         shutil.copytree(module, staging)
         (staging / "rules").mkdir(parents=True, exist_ok=True)
-        install_offline_rules(staging, generated)
         rules_mode = "offline-fallback"
         if rules_zip is not None:
             try:
@@ -219,9 +218,12 @@ def build(
             except (Exception, SystemExit) as error:
                 if not allow_rules_fallback:
                     raise
-                # Restore every runtime file in case copying the live set was interrupted.
+                # Overwrites every runtime file in case copying the live set
+                # was interrupted partway through.
                 install_offline_rules(staging, generated)
                 fallback_warning(error)
+        else:
+            install_offline_rules(staging, generated)
         shutil.copy2(generated / "strict.hosts", staging / "system/etc/hosts")
         if manager_apk is not None:
             if not manager_apk.is_file():

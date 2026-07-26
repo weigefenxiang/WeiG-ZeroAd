@@ -18,7 +18,6 @@ record RootStatus(
         String globalProfile,
         long ruleVersion,
         boolean rulesDownloaded,
-        int compiled,
         int running,
         int disabled,
         int customBlock,
@@ -61,7 +60,6 @@ record RootStatus(
                     json.optString("cn_profile", legacy),
                     json.optString("global_profile", "off"),
                     json.optLong("rule_version"), json.optBoolean("rules_downloaded"),
-                    json.optInt("compiled_rules"),
                     json.optInt("running_rules"), json.optInt("disabled_rules"),
                     json.optInt("user_block_rules"), json.optInt("user_allow_rules"),
                     json.optInt("reward_block_rules"),
@@ -78,6 +76,6 @@ record RootStatus(
     private static RootStatus empty(boolean pending, String error) {
         return new RootStatus(false, pending, false, false, "unknown", "unknown", 0,
                 "lean", "off", 0, false,
-                0, 0, 0, 0, 0, 0, false, 0, Set.of(), error);
+                0, 0, 0, 0, 0, false, 0, Set.of(), error);
     }
 }

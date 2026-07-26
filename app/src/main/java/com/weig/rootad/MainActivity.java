@@ -31,12 +31,20 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import android.content.SharedPreferences;
+
 import java.io.File;
+import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 public final class MainActivity extends Activity {
     private static final String UI_PREFERENCES = "zeroad-ui";
@@ -45,6 +53,15 @@ public final class MainActivity extends Activity {
     private static final int THEME_LIGHT = 1;
     private static final int THEME_DARK = 2;
 
+    /** Profile strengths in the order their buttons appear in each row. */
+    private static final String[] PROFILE_LEVELS = {"off", "lean", "balanced", "strict"};
+    /** Reward packs in the order their check boxes appear. */
+    private static final String[] REWARD_PACK_IDS = {
+            "reward.tencent", "reward.wechat", "reward.short-video", "reward.other"};
+    // \R is not a fast-path literal, so String.split would recompile it per call.
+    private static final Pattern LINE_BREAK = Pattern.compile("\\R");
+
+    private record EventLog(long startedAt, List<String> lines) {}
     private record UpdateCheck(
             RuleUpdater.Available rules,
             CodeUpdater.Available code,
@@ -52,6 +69,10 @@ public final class MainActivity extends Activity {
             String codeError
     ) {}
     private record RetainedState(RootStatus status, boolean themeRecreation) {}
+    private record CommandOutcome(RootShell.Result result, RootStatus status) {}
+    private record RuntimeLog(RootShell.Result events, String crashes) {}
+    private record IssueDiagnostics(String recentEvents, String crash) {}
+    private record UninstallOutcome(boolean unmounted, RootShell.Result result) {}
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -62,13 +83,14 @@ public final class MainActivity extends Activity {
     private TextView actionText, rewardCountdown;
     private ProgressBar progress, actionProgress;
     private Button protectionButton, rewardButton;
-    private Button cnOffButton, cnLeanButton, cnBalancedButton, cnStrictButton;
-    private Button globalOffButton, globalLeanButton, globalBalancedButton, globalStrictButton;
-    private CheckBox rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
+    private Button[] cnProfileButtons, globalProfileButtons;
+    private CheckBox[] rewardPacks;
+    private float density;
     private RootStatus latest;
     private boolean updatingUi;
     private boolean themeRecreation;
     private boolean skipResumeRefresh;
+    private boolean resumed;
     private boolean destroyed;
     private final Runnable countdownTick = new Runnable() {
         @Override public void run() {
@@ -99,6 +121,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         zh = Locale.getDefault().getLanguage().equals("zh");
+        density = getResources().getDisplayMetrics().density;
         surface = getColor(R.color.surface); card = getColor(R.color.surface_card);
         primary = getColor(R.color.text_primary); secondary = getColor(R.color.text_secondary);
         accent = getColor(R.color.accent); accentSoft = getColor(R.color.accent_soft);
@@ -130,11 +153,23 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
         if (skipResumeRefresh) {
             skipResumeRefresh = false;
+            // A theme recreation reuses the retained status, so nothing calls
+            // showStatus() here to restart the countdown.
+            startCountdown();
             return;
         }
         refresh();
+    }
+
+    @Override protected void onPause() {
+        // The tick fires every second and reads root state when it reaches zero.
+        // Nothing should keep running once the activity leaves the screen.
+        resumed = false;
+        main.removeCallbacks(countdownTick);
+        super.onPause();
     }
 
     @Override public Object onRetainNonConfigurationInstance() {
@@ -151,26 +186,24 @@ public final class MainActivity extends Activity {
     private void toggleTheme() {
         boolean dark = (getResources().getConfiguration().uiMode &
                 Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        boolean saved = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
-                .putInt(THEME_OVERRIDE, dark ? THEME_LIGHT : THEME_DARK)
-                .commit();
-        if (!saved) {
-            toast(t("无法保存主题设置", "Cannot save theme setting"));
-            return;
-        }
-        themeRecreation = true;
-        recreate();
+        switchTheme(dark ? THEME_LIGHT : THEME_DARK, null);
     }
 
     private void followSystemTheme() {
-        boolean saved = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit()
-                .remove(THEME_OVERRIDE)
-                .commit();
+        switchTheme(THEME_SYSTEM, t("已恢复跟随系统", "Following system theme"));
+    }
+
+    /** Persists the theme override synchronously, then recreates on success. */
+    private void switchTheme(int mode, String confirmation) {
+        SharedPreferences.Editor editor = getSharedPreferences(UI_PREFERENCES, MODE_PRIVATE).edit();
+        if (mode == THEME_SYSTEM) editor.remove(THEME_OVERRIDE);
+        else editor.putInt(THEME_OVERRIDE, mode);
+        boolean saved = editor.commit();
         if (!saved) {
             toast(t("无法保存主题设置", "Cannot save theme setting"));
             return;
         }
-        toast(t("已恢复跟随系统", "Following system theme"));
+        if (confirmation != null) toast(confirmation);
         themeRecreation = true;
         recreate();
     }
@@ -190,6 +223,24 @@ public final class MainActivity extends Activity {
         });
         scroll.addView(body);
 
+        body.addView(buildHeader(), margins(0, 0, 0, 20));
+        body.addView(buildHero());
+        body.addView(section(t("过滤模式", "Filter profiles")));
+        body.addView(buildProfiles());
+        body.addView(section(t("奖励广告拦截", "Reward-ad blocking")));
+        body.addView(buildRewards());
+        body.addView(section(t("自定义规则", "Custom rules")));
+        body.addView(buildCustomRules());
+        body.addView(section(t("更新", "Updates")));
+        body.addView(buildUpdates());
+        body.addView(section(t("支持与卸载", "Support & removal")));
+        body.addView(buildSupport());
+        body.addView(text("WeiG ZeroAd  " + BuildConfig.VERSION_NAME + "  ·  Android 12–16",
+                12, secondary, Typeface.NORMAL), margins(0, 22, 0, 0));
+        return scroll;
+    }
+
+    private LinearLayout buildHeader() {
         LinearLayout header = row();
         header.setGravity(Gravity.TOP);
         LinearLayout heading = column();
@@ -214,8 +265,10 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams themeLayout = new LinearLayout.LayoutParams(dp(44), dp(44));
         themeLayout.setMargins(dp(12), 0, 0, 0);
         header.addView(theme, themeLayout);
-        body.addView(header, margins(0, 0, 0, 20));
+        return header;
+    }
 
+    private LinearLayout buildHero() {
         LinearLayout hero = card();
         protectionText = text(t("正在检测 Root 核心", "Checking Root core"), 14, secondary, Typeface.BOLD);
         hero.addView(protectionText);
@@ -235,51 +288,49 @@ public final class MainActivity extends Activity {
         protectionButton = button(t("关闭保护", "Disable protection"), true);
         protectionButton.setOnClickListener(v -> toggleProtection());
         hero.addView(protectionButton, margins(0, 18, 0, 0));
-        body.addView(hero);
+        return hero;
+    }
 
-        body.addView(section(t("过滤模式", "Filter profiles")));
+    private LinearLayout buildProfiles() {
         LinearLayout profiles = card();
         profiles.addView(text(t("境内和境外分别选择强度；六个普通配置均不含奖励广告域名。", "Choose domestic and global strength separately. All normal profiles exclude reward-ad domains."),
                 14, secondary, Typeface.NORMAL));
         profiles.addView(text(t("境内规则", "Domestic rules"), 14, primary, Typeface.BOLD),
                 margins(0, 16, 0, 0));
-        LinearLayout cnTop = row();
-        cnOffButton = actionButton(t("关闭", "Off"), v -> command(
+        Button cnOffButton = actionButton(t("关闭", "Off"), v -> command(
                 "cn-profile off", t("正在关闭境内规则…", "Disabling domestic rules…")));
-        cnLeanButton = actionButton(t("精简", "Lean"), v -> command("cn-profile lean", t("正在切换境内精简…", "Selecting domestic Lean…")));
-        cnTop.addView(cnOffButton, weightMargins(1, 0, 10, 5, 0));
-        cnTop.addView(cnLeanButton, weightMargins(1, 0, 10, 0, 0));
-        profiles.addView(cnTop);
-        LinearLayout cnBottom = row();
-        cnBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("cn-profile balanced", t("正在切换境内平衡…", "Selecting domestic Balanced…")));
-        cnStrictButton = actionButton(t("严格", "Strict"), v -> command("cn-profile strict", t("正在切换境内严格…", "Selecting domestic Strict…")));
-        cnBottom.addView(cnBalancedButton, weightMargins(1, 0, 8, 5, 0));
-        cnBottom.addView(cnStrictButton, weightMargins(1, 0, 8, 0, 0));
-        profiles.addView(cnBottom);
-        profiles.addView(text(t("境外规则", "Global rules"), 14, primary, Typeface.BOLD), margins(0, 16, 0, 0));
-        LinearLayout globalTop = row();
-        globalOffButton = actionButton(t("关闭", "Off"), v -> command("global-profile off", t("正在关闭境外规则…", "Disabling global rules…")));
-        globalLeanButton = actionButton(t("精简", "Lean"), v -> command("global-profile lean", t("正在切换境外精简…", "Selecting global Lean…")));
-        globalTop.addView(globalOffButton, weightMargins(1, 0, 10, 5, 0));
-        globalTop.addView(globalLeanButton, weightMargins(1, 0, 10, 0, 0));
-        profiles.addView(globalTop);
-        LinearLayout globalBottom = row();
-        globalBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("global-profile balanced", t("正在切换境外平衡…", "Selecting global Balanced…")));
-        globalStrictButton = actionButton(t("严格", "Strict"), v -> command("global-profile strict", t("正在切换境外严格…", "Selecting global Strict…")));
-        globalBottom.addView(globalBalancedButton, weightMargins(1, 0, 8, 5, 0));
-        globalBottom.addView(globalStrictButton, weightMargins(1, 0, 8, 0, 0));
-        profiles.addView(globalBottom);
-        body.addView(profiles);
+        Button cnLeanButton = actionButton(t("精简", "Lean"), v -> command("cn-profile lean", t("正在切换境内精简…", "Selecting domestic Lean…")));
+        Button cnBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("cn-profile balanced", t("正在切换境内平衡…", "Selecting domestic Balanced…")));
+        Button cnStrictButton = actionButton(t("严格", "Strict"), v -> command("cn-profile strict", t("正在切换境内严格…", "Selecting domestic Strict…")));
+        profiles.addView(buttonPair(cnOffButton, cnLeanButton, 10));
+        profiles.addView(buttonPair(cnBalancedButton, cnStrictButton, 8));
 
-        body.addView(section(t("奖励广告拦截", "Reward-ad blocking")));
+        profiles.addView(text(t("境外规则", "Global rules"), 14, primary, Typeface.BOLD), margins(0, 16, 0, 0));
+        Button globalOffButton = actionButton(t("关闭", "Off"), v -> command("global-profile off", t("正在关闭境外规则…", "Disabling global rules…")));
+        Button globalLeanButton = actionButton(t("精简", "Lean"), v -> command("global-profile lean", t("正在切换境外精简…", "Selecting global Lean…")));
+        Button globalBalancedButton = actionButton(t("平衡", "Balanced"), v -> command("global-profile balanced", t("正在切换境外平衡…", "Selecting global Balanced…")));
+        Button globalStrictButton = actionButton(t("严格", "Strict"), v -> command("global-profile strict", t("正在切换境外严格…", "Selecting global Strict…")));
+        profiles.addView(buttonPair(globalOffButton, globalLeanButton, 10));
+        profiles.addView(buttonPair(globalBalancedButton, globalStrictButton, 8));
+
+        // Indexed the same as PROFILE_LEVELS so styling and enabling stay loops.
+        cnProfileButtons = new Button[]{cnOffButton, cnLeanButton, cnBalancedButton, cnStrictButton};
+        globalProfileButtons = new Button[]{
+                globalOffButton, globalLeanButton, globalBalancedButton, globalStrictButton};
+        return profiles;
+    }
+
+    private LinearLayout buildRewards() {
         LinearLayout rewards = card();
         rewards.addView(text(t("默认全部拦截，且始终与普通规则分离；需要领取奖励时可临时放行。",
                 "All packs are blocked by default and remain separate from normal rules. Temporarily allow them when needed."),
                 14, secondary, Typeface.NORMAL));
-        rewardTencent = packCheckBox(t("腾讯 / QQ 奖励广告", "Tencent / QQ reward ads"), "reward.tencent");
-        rewardWechat = packCheckBox(t("微信奖励广告", "WeChat reward ads"), "reward.wechat");
-        rewardShortVideo = packCheckBox(t("短视频奖励广告", "Short-video reward ads"), "reward.short-video");
-        rewardOther = packCheckBox(t("其他奖励广告", "Other reward ads"), "reward.other");
+        CheckBox rewardTencent = packCheckBox(t("腾讯 / QQ 奖励广告", "Tencent / QQ reward ads"), "reward.tencent");
+        CheckBox rewardWechat = packCheckBox(t("微信奖励广告", "WeChat reward ads"), "reward.wechat");
+        CheckBox rewardShortVideo = packCheckBox(t("短视频奖励广告", "Short-video reward ads"), "reward.short-video");
+        CheckBox rewardOther = packCheckBox(t("其他奖励广告", "Other reward ads"), "reward.other");
+        // Indexed the same as REWARD_PACK_IDS.
+        rewardPacks = new CheckBox[]{rewardTencent, rewardWechat, rewardShortVideo, rewardOther};
         rewards.addView(rewardTencent, margins(0, 12, 0, 0));
         rewards.addView(rewardWechat);
         rewards.addView(rewardShortVideo);
@@ -290,18 +341,20 @@ public final class MainActivity extends Activity {
         rewardButton = button(t("临时允许已选奖励广告 10 分钟", "Allow selected reward ads for 10 minutes"), false);
         rewardButton.setOnClickListener(v -> toggleRewardTimer());
         rewards.addView(rewardButton, margins(0, 10, 0, 0));
-        body.addView(rewards);
+        return rewards;
+    }
 
-        body.addView(section(t("自定义规则", "Custom rules")));
+    private LinearLayout buildCustomRules() {
         LinearLayout custom = card();
         custom.addView(text(t("添加精确域名到拦截、放行或手动关闭列表。自定义内容不会被规则更新覆盖。",
                 "Add exact domains to block, allow, or disabled lists. Updates never overwrite them."), 14, secondary, Typeface.NORMAL));
         Button edit = button(t("添加或调整域名", "Add or change a domain"), false);
         edit.setOnClickListener(v -> ruleDialog());
         custom.addView(edit, margins(0, 14, 0, 0));
-        body.addView(custom);
+        return custom;
+    }
 
-        body.addView(section(t("更新", "Updates")));
+    private LinearLayout buildUpdates() {
         LinearLayout updates = card();
         updateText = text(t("规则、管理器和核心模块分别更新。", "Rules, manager, and core update independently."),
                 14, secondary, Typeface.NORMAL);
@@ -315,9 +368,10 @@ public final class MainActivity extends Activity {
         Button rollback = button(t("回滚上一版规则", "Roll back rules"), false);
         rollback.setOnClickListener(v -> command("rules-rollback"));
         updates.addView(rollback, margins(0, 10, 0, 0));
-        body.addView(updates);
+        return updates;
+    }
 
-        body.addView(section(t("支持与卸载", "Support & removal")));
+    private LinearLayout buildSupport() {
         LinearLayout support = card();
         Button issue = button(t("问题反馈 · 提交 GitHub Issue", "Report issue · GitHub"), false);
         issue.setOnClickListener(v -> openIssue());
@@ -329,19 +383,11 @@ public final class MainActivity extends Activity {
         uninstall.setTextColor(Color.rgb(210, 55, 60));
         uninstall.setOnClickListener(v -> confirmUninstall());
         support.addView(uninstall, margins(0, 10, 0, 0));
-        body.addView(support);
-
-        body.addView(text("WeiG ZeroAd  " + BuildConfig.VERSION_NAME + "  ·  Android 12–16",
-                12, secondary, Typeface.NORMAL), margins(0, 22, 0, 0));
-        return scroll;
+        return support;
     }
 
     private void refresh() {
-        busy(true, t("读取核心状态…", "Reading core status…"));
-        worker.execute(() -> {
-            RootStatus status = RootStatus.read();
-            postUi(() -> showStatus(status));
-        });
+        background(t("读取核心状态…", "Reading core status…"), RootStatus::read, this::showStatus);
     }
 
     private void showStatus(RootStatus status) {
@@ -362,8 +408,12 @@ public final class MainActivity extends Activity {
         if (!status.installed()) {
             protectionText.setText(t("尚未安装 Root 核心", "Root core is not installed"));
             countText.setText("0");
-            detailText.setText(t("请安装一体包或 core-only 模块；若刚安装，请重启设备。",
-                    "Install the all-in-one or core-only module. Reboot if it was just installed."));
+            String detail = t("请安装一体包或 core-only 模块；若刚安装，请重启设备。",
+                    "Install the all-in-one or core-only module. Reboot if it was just installed.");
+            // A core that answered but produced an unusable response is not the
+            // same as an absent one; show what actually went wrong.
+            if (!status.error().isBlank()) detail += "\n" + status.error();
+            detailText.setText(detail);
             protectionButton.setEnabled(false);
             setRuleControlsEnabled(false);
             return;
@@ -386,20 +436,24 @@ public final class MainActivity extends Activity {
         protectionButton.setText(status.protection() ? t("关闭保护", "Disable protection") : t("开启保护", "Enable protection"));
         styleProfileButtons(status.cnProfile(), status.globalProfile());
         updatingUi = true;
-        rewardTencent.setChecked(status.packEnabled("reward.tencent"));
-        rewardWechat.setChecked(status.packEnabled("reward.wechat"));
-        rewardShortVideo.setChecked(status.packEnabled("reward.short-video"));
-        rewardOther.setChecked(status.packEnabled("reward.other"));
+        for (int index = 0; index < rewardPacks.length; index++) {
+            rewardPacks[index].setChecked(status.packEnabled(REWARD_PACK_IDS[index]));
+        }
         updatingUi = false;
         if (status.rewardTemporarilyAllowed()) {
             rewardCountdown.setVisibility(View.VISIBLE);
             rewardButton.setText(t("立即结束临时放行", "End temporary allowance"));
-            main.post(countdownTick);
+            startCountdown();
         } else {
             rewardCountdown.setVisibility(View.GONE);
             rewardButton.setText(t("临时允许已选奖励广告 10 分钟", "Allow selected reward ads for 10 minutes"));
         }
         rewardButton.setEnabled(status.rewardBlock() > 0 || status.rewardTemporarilyAllowed());
+    }
+
+    private void startCountdown() {
+        main.removeCallbacks(countdownTick);
+        if (resumed && latest != null && latest.rewardTemporarilyAllowed()) main.post(countdownTick);
     }
 
     private void toggleProtection() {
@@ -412,7 +466,21 @@ public final class MainActivity extends Activity {
     private void command(String command) { command(command, t("正在应用…", "Applying…")); }
 
     private void command(String command, String message) {
-        busy(true, message);
+        previewCommand(command, message);
+        protectionButton.setEnabled(false);
+        setRuleControlsEnabled(false);
+        background(message, () -> {
+            RootShell.Result result = RootShell.runControl(command);
+            return new CommandOutcome(
+                    result, result.ok() ? RootStatus.fromResult(result) : RootStatus.read());
+        }, outcome -> {
+            if (!outcome.result().ok()) toast(outcome.result().output());
+            showStatus(outcome.status());
+        });
+    }
+
+    /** Shows the expected end state immediately so the tap feels instant. */
+    private void previewCommand(String command, String message) {
         if (command.startsWith("cn-profile ")) {
             styleProfileButtons(command.substring("cn-profile ".length()),
                     latest == null ? "off" : latest.globalProfile());
@@ -430,16 +498,6 @@ public final class MainActivity extends Activity {
             rewardButton.setText(t("正在恢复拦截…", "Restoring blocking…"));
             rewardCountdown.setVisibility(View.GONE);
         }
-        protectionButton.setEnabled(false);
-        setRuleControlsEnabled(false);
-        worker.execute(() -> {
-            RootShell.Result result = RootShell.runControl(command);
-            RootStatus status = result.ok() ? RootStatus.fromResult(result) : RootStatus.read();
-            postUi(() -> {
-                if (!result.ok()) toast(result.output());
-                showStatus(status);
-            });
-        });
     }
 
     private void toggleRewardTimer() {
@@ -482,11 +540,8 @@ public final class MainActivity extends Activity {
     }
 
     private void checkUpdates() {
-        busy(true, t("正在检查规则、管理器和核心…", "Checking rules, manager, and core…"));
-        worker.execute(() -> {
-            UpdateCheck result = performUpdateCheck();
-            postUi(() -> showUpdateCheck(result));
-        });
+        background(t("正在检查规则、管理器和核心…", "Checking rules, manager, and core…"),
+                this::performUpdateCheck, this::showUpdateCheck);
     }
 
     private UpdateCheck performUpdateCheck() {
@@ -520,15 +575,13 @@ public final class MainActivity extends Activity {
         String rulesLine = result.rules() == null
                 ? t("规则：检查失败 · ", "Rules: check failed · ") + result.rulesError()
                 : t("规则：", "Rules: ") + rulesCurrent + " → " +
-                formatRuleVersion(result.rules().version()) +
-                (rulesNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date"));
+                formatRuleVersion(result.rules().version()) + updateSuffix(rulesNew);
         String managerLine = result.code() == null
                 ? t("APK：检查失败 · ", "APK: check failed · ") + result.codeError()
                 : t("APK：", "APK: ") +
                 formatCodeVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE) + " → " +
                 formatCodeVersion(result.code().manager().versionName(),
-                        result.code().manager().versionCode()) +
-                (managerNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date"));
+                        result.code().manager().versionCode()) + updateSuffix(managerNew);
         String coreCurrent = status == null || !status.installed()
                 ? t("未安装", "not installed")
                 : formatCodeVersion(status.coreVersion(), status.coreVersionCode());
@@ -537,8 +590,7 @@ public final class MainActivity extends Activity {
                 : t("核心：", "Core: ") + coreCurrent + " → " +
                 formatCodeVersion(result.code().core().versionName(),
                         result.code().core().versionCode()) +
-                (corePending ? t(" · 等待重启", " · reboot pending") :
-                        (coreNew ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date")));
+                (corePending ? t(" · 等待重启", " · reboot pending") : updateSuffix(coreNew));
         String message = rulesLine + "\n\n" + managerLine + "\n\n" + coreLine + "\n\n" + t(
                 "规则立即生效；APK 安装后重新打开；核心重启后生效。",
                 "Rules apply immediately; reopen the APK after installation; core updates apply after reboot.");
@@ -551,92 +603,81 @@ public final class MainActivity extends Activity {
                 .setNegativeButton(t("更新核心", "Update core"), null)
                 .create();
         dialog.setOnShowListener(ignored -> {
-            Button rulesButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            Button managerButton = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
-            Button coreButton = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
-            rulesButton.setEnabled(rulesNew);
-            managerButton.setEnabled(managerNew);
-            coreButton.setEnabled(coreNew);
-            styleUpdateButton(rulesButton, rulesNew, result.rules() == null);
-            styleUpdateButton(managerButton, managerNew, result.code() == null);
-            styleUpdateButton(coreButton, coreNew, result.code() == null);
-            if (rulesNew) rulesButton.setOnClickListener(view -> {
-                dialog.dismiss();
-                installRules(result.rules());
-            });
-            if (managerNew) managerButton.setOnClickListener(view -> {
-                dialog.dismiss();
-                updateApp(result.code().manager());
-            });
-            if (coreNew) coreButton.setOnClickListener(view -> {
-                dialog.dismiss();
-                updateCore(result.code().core());
-            });
+            Button[] buttons = {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE),
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL),
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE)};
+            boolean[] available = {rulesNew, managerNew, coreNew};
+            boolean[] checkFailed = {
+                    result.rules() == null, result.code() == null, result.code() == null};
+            Runnable[] actions = {
+                    () -> installRules(result.rules()),
+                    () -> updateApp(result.code().manager()),
+                    () -> updateCore(result.code().core())};
+            for (int index = 0; index < buttons.length; index++) {
+                Button button = buttons[index];
+                Runnable action = actions[index];
+                button.setEnabled(available[index]);
+                styleUpdateButton(button, available[index], checkFailed[index]);
+                if (available[index]) button.setOnClickListener(view -> {
+                    dialog.dismiss();
+                    action.run();
+                });
+            }
         });
         dialog.show();
     }
 
     private void installRules(RuleUpdater.Available available) {
-        busy(true, t("正在下载并验证规则…", "Downloading and verifying rules…"));
-        worker.execute(() -> {
-            try {
-                RuleUpdater.Result result = RuleUpdater.install(this, available);
-                postUi(() -> {
-                    toast(t("规则已更新：", "Rules updated: ") +
-                            formatRuleVersion(result.version()));
+        background(t("正在下载并验证规则…", "Downloading and verifying rules…"),
+                () -> RuleUpdater.install(this, available),
+                result -> {
+                    toast(t("规则已更新：", "Rules updated: ") + formatRuleVersion(result.version()));
                     refresh();
-                });
-            } catch (Exception error) {
-                postUi(() -> rulesUpdateFailed(error));
-            }
-        });
+                },
+                this::rulesUpdateFailed);
     }
 
     private void updateApp(CodeUpdater.Component manager) {
-        busy(true, t("正在下载并验证 APK…", "Downloading and verifying APK…"));
-        worker.execute(() -> {
-            try {
-                File file = CodeUpdater.download(this, manager, 80L * 1024 * 1024);
-                postUi(() -> {
-                    busy(false, null);
-                    try { ApkInstaller.install(this, file, (message, ok) -> postUi(() -> toast(message))); }
-                    catch (Exception error) { failed(error); }
-                });
-            } catch (Exception error) { postUi(() -> failed(error)); }
-        });
+        background(t("正在下载并验证 APK…", "Downloading and verifying APK…"),
+                () -> {
+                    File file = CodeUpdater.download(this, manager, 80L * 1024 * 1024);
+                    // Signature verification and streaming the APK into the
+                    // install session take far too long for the main thread;
+                    // the installer only reports back through postUi.
+                    ApkInstaller.install(this, file, (message, ok) -> postUi(() -> toast(message)));
+                    return file;
+                },
+                file -> busy(false, null));
     }
 
     private void updateCore(CodeUpdater.Component core) {
-        busy(true, t("正在下载并验证核心…", "Downloading and verifying core…"));
-        worker.execute(() -> {
-            try {
-                File file = CodeUpdater.download(this, core, 50L * 1024 * 1024);
-                String path = file.getAbsolutePath();
-                String command = "if command -v magisk >/dev/null 2>&1; then magisk --install-module " + RootShell.quote(path) +
-                        "; elif command -v ksud >/dev/null 2>&1; then ksud module install " + RootShell.quote(path) +
-                        "; elif command -v apd >/dev/null 2>&1; then apd module install " + RootShell.quote(path) +
-                        "; else echo 'No supported module installer found'; exit 1; fi";
-                RootShell.Result result = RootShell.run(command);
-                if (!result.ok()) throw new IllegalStateException(result.output());
-                postUi(() -> { toast(t("核心已更新，重启后生效", "Core updated; reboot to apply")); refresh(); });
-            } catch (Exception error) { postUi(() -> failed(error)); }
-        });
+        background(t("正在下载并验证核心…", "Downloading and verifying core…"),
+                () -> {
+                    File file = CodeUpdater.download(this, core, 50L * 1024 * 1024);
+                    String path = file.getAbsolutePath();
+                    String command = "if command -v magisk >/dev/null 2>&1; then magisk --install-module " + RootShell.quote(path) +
+                            "; elif command -v ksud >/dev/null 2>&1; then ksud module install " + RootShell.quote(path) +
+                            "; elif command -v apd >/dev/null 2>&1; then apd module install " + RootShell.quote(path) +
+                            "; else echo 'No supported module installer found'; exit 1; fi";
+                    RootShell.Result result = RootShell.run(command);
+                    if (!result.ok()) throw new IllegalStateException(result.output());
+                    return result;
+                },
+                ignored -> { toast(t("核心已更新，重启后生效", "Core updated; reboot to apply")); refresh(); });
     }
 
     private void showRuntimeLog() {
-        busy(true, t("正在读取运行日志…", "Reading runtime log…"));
-        worker.execute(() -> {
-            RootShell.Result result = RootShell.runControl("events");
-            String crashes = CrashLog.read(this);
-            postUi(() -> presentRuntimeLog(result, crashes));
-        });
+        background(t("正在读取运行日志…", "Reading runtime log…"),
+                () -> new RuntimeLog(RootShell.runControl("events"), CrashLog.read(this)),
+                log -> presentRuntimeLog(log.events(), log.crashes()));
     }
 
     private void presentRuntimeLog(RootShell.Result result, String crashes) {
         busy(false, null);
-        String raw = result.ok() ? result.output() : "";
-        long startedAt = readStartedAt(raw);
-        String events = eventLines(raw);
+        EventLog log = parseEvents(result.ok() ? result.output() : "");
+        long startedAt = log.startedAt();
+        String events = String.join("\n", log.lines());
         RootStatus status = latest;
         String summary = t("当前已加载：", "Currently loaded: ") +
                 String.format(Locale.US, "%,d", status == null ? 0 : status.running()) +
@@ -668,13 +709,14 @@ public final class MainActivity extends Activity {
     }
 
     private void openIssue() {
-        busy(true, t("正在准备安全诊断…", "Preparing safe diagnostics…"));
-        worker.execute(() -> {
-            RootShell.Result events = RootShell.runControl("events");
-            String recent = events.ok() ? recentEventLines(events.output(), 8) : "";
-            String crash = CrashLog.latest(this);
-            postUi(() -> launchIssue(recent, crash));
-        });
+        background(t("正在准备安全诊断…", "Preparing safe diagnostics…"),
+                () -> {
+                    RootShell.Result events = RootShell.runControl("events");
+                    return new IssueDiagnostics(
+                            events.ok() ? recentEvents(events.output(), 8) : "",
+                            CrashLog.latest(this));
+                },
+                diagnostics -> launchIssue(diagnostics.recentEvents(), diagnostics.crash()));
     }
 
     private void launchIssue(String recentEvents, String crash) {
@@ -701,39 +743,31 @@ public final class MainActivity extends Activity {
                 "\nDo not attach account tokens, cookies, or full HTTPS payloads.";
         String url = "https://github.com/" + BuildConfig.GITHUB_OWNER + "/" + BuildConfig.CODE_REPOSITORY +
                 "/issues/new?title=" + encode(title) + "&body=" + encode(body);
-        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception error) {
+            toast(t("没有可打开链接的浏览器", "No browser available to open the link"));
+        }
     }
 
-    private long readStartedAt(String output) {
-        for (String line : output.split("\\R")) {
-            if (!line.startsWith("started_at=")) continue;
-            try { return Long.parseLong(line.substring("started_at=".length())); }
-            catch (NumberFormatException ignored) { return 0; }
+    /** Splits the core's events output once instead of once per consumer. */
+    private static EventLog parseEvents(String output) {
+        long startedAt = 0;
+        List<String> lines = new ArrayList<>();
+        for (String line : LINE_BREAK.split(output)) {
+            if (line.startsWith("started_at=")) {
+                try { startedAt = Long.parseLong(line.substring("started_at=".length())); }
+                catch (NumberFormatException ignored) {}
+            } else if (!line.isBlank()) {
+                lines.add(line);
+            }
         }
-        return 0;
+        return new EventLog(startedAt, lines);
     }
 
-    private String eventLines(String output) {
-        StringBuilder value = new StringBuilder();
-        for (String line : output.split("\\R")) {
-            if (line.isBlank() || line.startsWith("started_at=")) continue;
-            if (!value.isEmpty()) value.append('\n');
-            value.append(line);
-        }
-        return value.toString();
-    }
-
-    private String recentEventLines(String output, int maximumLines) {
-        String events = eventLines(output);
-        if (events.isBlank()) return "";
-        String[] lines = events.split("\\R");
-        int first = Math.max(0, lines.length - maximumLines);
-        StringBuilder value = new StringBuilder();
-        for (int index = first; index < lines.length; index++) {
-            if (!value.isEmpty()) value.append('\n');
-            value.append(lines[index]);
-        }
-        return value.toString();
+    private static String recentEvents(String output, int maximumLines) {
+        List<String> lines = parseEvents(output).lines();
+        return String.join("\n", lines.subList(Math.max(0, lines.size() - maximumLines), lines.size()));
     }
 
     private String protectionDuration(long startedAt, boolean enabled) {
@@ -757,42 +791,71 @@ public final class MainActivity extends Activity {
     }
 
     private void fullUninstall() {
-        busy(true, t("正在清理规则…", "Removing rules…"));
-        worker.execute(() -> {
-            RootShell.Result result = RootShell.runControl("cleanup-mount");
-            if (!result.ok()) {
-                postUi(() -> {
+        background(t("正在清理规则…", "Removing rules…"),
+                () -> {
+                    RootShell.Result unmount = RootShell.runControl("cleanup-mount");
+                    if (!unmount.ok()) return new UninstallOutcome(false, unmount);
+                    return new UninstallOutcome(true, RootShell.run(
+                            "rm -rf /data/adb/weig_rootad /data/adb/weig_rootad-user-backup " +
+                            "/data/adb/modules/weig_rootad " +
+                            "/data/adb/modules_update/weig_rootad"));
+                },
+                outcome -> {
                     busy(false, null);
-                    toast(t("无法关闭 hosts 挂载，未删除任何文件：",
-                            "Could not remove the hosts mount; no files were deleted: ") +
-                            result.output());
+                    if (!outcome.unmounted()) {
+                        toast(t("无法关闭 hosts 挂载，未删除任何文件：",
+                                "Could not remove the hosts mount; no files were deleted: ") +
+                                outcome.result().output());
+                        return;
+                    }
+                    if (!outcome.result().ok()) { toast(outcome.result().output()); return; }
+                    try {
+                        startActivity(new Intent(
+                                Intent.ACTION_DELETE, Uri.parse("package:" + getPackageName())));
+                    } catch (Exception error) {
+                        toast(t("请在系统设置中卸载 APK", "Uninstall the APK from system settings"));
+                    }
                 });
-                return;
+    }
+
+    /**
+     * Runs {@code work} on the single background thread and delivers its result
+     * back on the main thread, skipping delivery if the activity is gone.
+     */
+    private <T> void background(String message, Callable<T> work, Consumer<T> done) {
+        background(message, work, done, this::failed);
+    }
+
+    private <T> void background(
+            String message, Callable<T> work, Consumer<T> done, Consumer<Exception> failure) {
+        // onDestroy shuts the worker down; submitting afterwards would throw
+        // RejectedExecutionException on the main thread.
+        if (destroyed) return;
+        busy(true, message);
+        worker.execute(() -> {
+            try {
+                T value = work.call();
+                postUi(() -> done.accept(value));
+            } catch (Exception error) {
+                postUi(() -> failure.accept(error));
             }
-            RootShell.Result remove = RootShell.run(
-                    "rm -rf /data/adb/weig_rootad /data/adb/weig_rootad-user-backup " +
-                    "/data/adb/modules/weig_rootad " +
-                    "/data/adb/modules_update/weig_rootad");
-            postUi(() -> {
-                busy(false, null);
-                if (!remove.ok()) { toast(remove.output()); return; }
-                startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + getPackageName())));
-            });
         });
     }
 
-    private void failed(Exception error) { busy(false, null); toast(error.getMessage() == null ? error.toString() : error.getMessage()); }
+    private void failed(Exception error) { busy(false, null); toast(describe(error)); }
+    private static String describe(Exception error) {
+        return error.getMessage() == null ? error.toString() : error.getMessage();
+    }
     private String errorMessage(Exception error) {
-        String value = error.getMessage() == null ? error.toString() : error.getMessage();
+        String value = describe(error);
         return value.length() > 96 ? value.substring(0, 96) + "…" : value;
     }
     private void rulesUpdateFailed(Exception error) {
         busy(false, null);
-        String detail = error.getMessage() == null ? error.toString() : error.getMessage();
         toast(t(
                 "规则更新失败，已继续使用当前规则；首次安装会使用 Wei.G 20260723 基础规则。原因：",
                 "Rule update failed. Current rules were kept; first install uses the Wei.G " +
-                        "20260723 base. Reason: ") + detail);
+                        "20260723 base. Reason: ") + describe(error));
         refresh();
     }
     private String formatRuleVersion(long version) {
@@ -804,6 +867,9 @@ public final class MainActivity extends Activity {
     }
     private String formatCodeVersion(String name, int code) {
         return name + " (" + code + ")";
+    }
+    private String updateSuffix(boolean available) {
+        return available ? t(" · 可更新", " · update available") : t(" · 已是最新", " · up to date");
     }
     private void styleUpdateButton(Button button, boolean available, boolean failed) {
         button.setTextColor(available ? updateAvailable :
@@ -824,7 +890,7 @@ public final class MainActivity extends Activity {
     private String t(String chinese, String english) { return zh ? chinese : english; }
     private String encode(String value) {
         try { return URLEncoder.encode(value, StandardCharsets.UTF_8.name()); }
-        catch (Exception impossible) { return value; }
+        catch (UnsupportedEncodingException impossible) { throw new AssertionError(impossible); }
     }
 
     private LinearLayout column() { LinearLayout value = new LinearLayout(this); value.setOrientation(LinearLayout.VERTICAL); return value; }
@@ -833,6 +899,12 @@ public final class MainActivity extends Activity {
     private TextView section(String value) { TextView text = text(value, 16, primary, Typeface.BOLD); text.setPadding(0, dp(26), 0, dp(10)); return text; }
     private TextView text(String value, int size, int color, int style) { TextView text = new TextView(this); text.setText(value); text.setTextSize(size); text.setTextColor(color); text.setTypeface(Typeface.create("sans", style)); text.setLineSpacing(0, 1.12f); return text; }
     private Button actionButton(String value, View.OnClickListener listener) { Button button = button(value, false); button.setOnClickListener(listener); return button; }
+    private LinearLayout buttonPair(Button first, Button second, int top) {
+        LinearLayout pair = row();
+        pair.addView(first, weightMargins(1, 0, top, 5, 0));
+        pair.addView(second, weightMargins(1, 0, top, 0, 0));
+        return pair;
+    }
     private CheckBox packCheckBox(String label, String id) {
         CheckBox checkBox = new CheckBox(this);
         checkBox.setText(label);
@@ -845,22 +917,16 @@ public final class MainActivity extends Activity {
         return checkBox;
     }
     private void setRuleControlsEnabled(boolean enabled) {
-        if (cnLeanButton == null) return;
-        cnOffButton.setEnabled(enabled);
-        cnLeanButton.setEnabled(enabled);
-        cnBalancedButton.setEnabled(enabled);
-        cnStrictButton.setEnabled(enabled);
-        globalOffButton.setEnabled(enabled);
-        globalLeanButton.setEnabled(enabled);
-        globalBalancedButton.setEnabled(enabled);
-        globalStrictButton.setEnabled(enabled);
-        rewardTencent.setEnabled(enabled);
-        rewardWechat.setEnabled(enabled);
-        rewardShortVideo.setEnabled(enabled);
-        rewardOther.setEnabled(enabled);
+        for (Button button : cnProfileButtons) button.setEnabled(enabled);
+        for (Button button : globalProfileButtons) button.setEnabled(enabled);
+        for (CheckBox pack : rewardPacks) pack.setEnabled(enabled);
         rewardButton.setEnabled(enabled);
     }
     private void styleChoice(Button button, boolean selected) {
+        // Restyling runs on every refresh; skip the drawable allocation when
+        // the selection state is unchanged.
+        if (Boolean.valueOf(selected).equals(button.getTag())) return;
+        button.setTag(selected);
         button.setTextColor(selected ? Color.WHITE : accent);
         button.setBackground(round(selected ? accent : accentSoft, 14, selected ? accent : divider));
     }
@@ -874,18 +940,17 @@ public final class MainActivity extends Activity {
         };
     }
     private void styleProfileButtons(String cn, String global) {
-        styleChoice(cnOffButton, cn.equals("off"));
-        styleChoice(cnLeanButton, cn.equals("lean"));
-        styleChoice(cnBalancedButton, cn.equals("balanced"));
-        styleChoice(cnStrictButton, cn.equals("strict"));
-        styleChoice(globalOffButton, global.equals("off"));
-        styleChoice(globalLeanButton, global.equals("lean"));
-        styleChoice(globalBalancedButton, global.equals("balanced"));
-        styleChoice(globalStrictButton, global.equals("strict"));
+        styleProfileRow(cnProfileButtons, cn);
+        styleProfileRow(globalProfileButtons, global);
+    }
+    private void styleProfileRow(Button[] buttons, String selected) {
+        for (int index = 0; index < buttons.length; index++) {
+            styleChoice(buttons[index], PROFILE_LEVELS[index].equals(selected));
+        }
     }
     private Button button(String value, boolean filled) { Button button = new Button(this); button.setText(value); button.setTextSize(14); button.setAllCaps(false); button.setTypeface(Typeface.DEFAULT, Typeface.BOLD); button.setTextColor(filled ? Color.WHITE : accent); button.setGravity(Gravity.CENTER); button.setMinHeight(dp(48)); button.setBackground(round(filled ? accent : accentSoft, 14, filled ? accent : divider)); return button; }
     private GradientDrawable round(int fill, int radius, int stroke) { GradientDrawable value = new GradientDrawable(); value.setColor(fill); value.setCornerRadius(dp(radius)); value.setStroke(dp(1), stroke); return value; }
     private LinearLayout.LayoutParams margins(int left, int top, int right, int bottom) { LinearLayout.LayoutParams value = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); value.setMargins(dp(left), dp(top), dp(right), dp(bottom)); return value; }
     private LinearLayout.LayoutParams weightMargins(float weight, int left, int top, int right, int bottom) { LinearLayout.LayoutParams value = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight); value.setMargins(dp(left), dp(top), dp(right), dp(bottom)); return value; }
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return Math.round(value * density); }
 }

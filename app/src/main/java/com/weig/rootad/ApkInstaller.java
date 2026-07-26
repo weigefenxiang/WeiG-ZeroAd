@@ -31,11 +31,17 @@ final class ApkInstaller {
         if (!activity.getPackageManager().canRequestPackageInstalls()) {
             Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:" + activity.getPackageName()));
-            activity.startActivity(settings);
             apk.delete();
-            callback.completed(message(
-                    "请允许 WeiG ZeroAd 安装应用，然后再次点击更新。",
-                    "Allow WeiG ZeroAd to install apps, then tap update again."), false);
+            try {
+                activity.startActivity(settings);
+                callback.completed(message(
+                        "请允许 WeiG ZeroAd 安装应用，然后再次点击更新。",
+                        "Allow WeiG ZeroAd to install apps, then tap update again."), false);
+            } catch (Exception error) {
+                callback.completed(message(
+                        "无法打开未知来源设置：",
+                        "Cannot open the unknown-sources setting: ") + error.getMessage(), false);
+            }
             return;
         }
         String resultAction = ACTION_PREFIX + UUID.randomUUID();

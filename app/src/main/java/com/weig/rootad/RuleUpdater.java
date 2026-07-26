@@ -13,7 +13,9 @@ import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -28,6 +30,10 @@ final class RuleUpdater {
     record Available(long version, ReleaseClient.Asset asset) {}
 
     private static final Pattern RULE_TAG = Pattern.compile("rules-([0-9]{10})");
+    // Hoisted out of the per-line loop: String.matches recompiles the pattern on
+    // every call, which cost one compilation per domain across all eleven files.
+    private static final Pattern EXACT_DOMAIN = Pattern.compile(
+            "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+");
 
     private static final List<String> PROFILE_FILES = List.of(
             "cn-lean.domains", "cn-balanced.domains", "cn-strict.domains",
@@ -57,15 +63,13 @@ final class RuleUpdater {
     private RuleUpdater() {}
 
     static Available checkLatest() throws Exception {
-        ReleaseClient.Release release = ReleaseClient.latestWithAsset(
+        ReleaseClient.Match match = ReleaseClient.latestWithAsset(
                 BuildConfig.RULES_REPOSITORY, "zeroad-rules", ".zip");
-        Matcher matcher = RULE_TAG.matcher(release.tag());
+        Matcher matcher = RULE_TAG.matcher(match.release().tag());
         if (!matcher.matches()) throw new SecurityException("Invalid rules release tag");
         long version = Long.parseLong(matcher.group(1));
         if (version < 1) throw new SecurityException("Invalid rule version");
-        ReleaseClient.Asset asset = release.matching("zeroad-rules", ".zip");
-        if (asset == null) throw new IllegalStateException("Rules release has no ZIP asset");
-        return new Available(version, asset);
+        return new Available(version, match.asset());
     }
 
     static Result install(Context context, Available available) throws Exception {
@@ -80,8 +84,13 @@ final class RuleUpdater {
                 throw new IllegalStateException("Cannot create rule staging directory");
             extractDataOnly(archive, extracted);
 
+            File manifestFile = new File(extracted, "manifest.json");
+            // The aggregate archive cap alone would still let a hostile manifest
+            // reach ~160 MB; parse only a plausibly sized one.
+            if (manifestFile.length() > 1024 * 1024)
+                throw new SecurityException("Rule manifest is too large");
             JSONObject manifest = new JSONObject(new String(
-                    Files.readAllBytes(new File(extracted, "manifest.json").toPath()),
+                    Files.readAllBytes(manifestFile.toPath()),
                     StandardCharsets.UTF_8));
             if (manifest.getInt("schema") != 3)
                 throw new SecurityException("Unsupported rule schema");
@@ -90,32 +99,20 @@ final class RuleUpdater {
                 throw new SecurityException("Release tag and rule manifest version differ");
 
             JSONObject profiles = manifest.getJSONObject("profiles");
-            Validated cnLean = validateProfile(extracted, profiles, "cn", "lean");
-            Validated cnBalanced = validateProfile(extracted, profiles, "cn", "balanced");
-            Validated cnStrict = validateProfile(extracted, profiles, "cn", "strict");
-            Validated globalLean = validateProfile(extracted, profiles, "global", "lean");
-            Validated globalBalanced = validateProfile(extracted, profiles, "global", "balanced");
-            Validated globalStrict = validateProfile(extracted, profiles, "global", "strict");
-            Validated[] validatedProfiles = {
-                    cnLean, cnBalanced, cnStrict,
-                    globalLean, globalBalanced, globalStrict
-            };
-            if (!cnBalanced.domains().containsAll(cnLean.domains()) ||
-                    !cnStrict.domains().containsAll(cnBalanced.domains()))
-                throw new SecurityException("Domestic profiles are not monotonic");
-            if (!globalBalanced.domains().containsAll(globalLean.domains()) ||
-                    !globalStrict.domains().containsAll(globalBalanced.domains()))
-                throw new SecurityException("Global profiles are not monotonic");
-            if (!disjoint(cnStrict.domains(), globalStrict.domains()))
+            Set<String> cnStrict = validateRegion(extracted, profiles, "cn", "Domestic");
+            Set<String> globalStrict = validateRegion(extracted, profiles, "global", "Global");
+            if (!Collections.disjoint(cnStrict, globalStrict))
                 throw new SecurityException("Domestic and global profiles overlap");
 
-            Validated reward = validateFile(extracted, "reward-ads.domains",
+            Set<String> reward = validateFile(extracted, "reward-ads.domains",
                     manifest.getJSONObject("reward"));
-            int profileIndex = 0;
-            for (String name : PROFILE_FILES) {
-                if (!disjoint(validatedProfiles[profileIndex++].domains(), reward.domains()))
-                    throw new SecurityException("Reward rules overlap " + name);
-            }
+            // The profiles are monotonic, so a reward domain absent from both
+            // strict sets cannot appear in lean or balanced either. Two checks
+            // therefore cover all six profiles.
+            if (!Collections.disjoint(cnStrict, reward))
+                throw new SecurityException("Reward rules overlap the domestic profiles");
+            if (!Collections.disjoint(globalStrict, reward))
+                throw new SecurityException("Reward rules overlap the global profiles");
 
             Set<String> packUnion = new HashSet<>();
             JSONArray packs = manifest.getJSONArray("packs");
@@ -124,13 +121,12 @@ final class RuleUpdater {
                 String name = pack.getString("file");
                 if (!REWARD_FILES.contains(name) || name.equals("reward-ads.domains"))
                     throw new SecurityException("Unknown reward pack file");
-                Validated validated = validateFile(extracted, name, pack);
-                for (String domain : validated.domains()) {
+                for (String domain : validateFile(extracted, name, pack)) {
                     if (!packUnion.add(domain))
                         throw new SecurityException("Reward packs overlap");
                 }
             }
-            if (!packUnion.equals(reward.domains()))
+            if (!packUnion.equals(reward))
                 throw new SecurityException("Reward pack union mismatch");
 
             remote = "/data/local/tmp/weig_zeroad-rules-" + version;
@@ -162,49 +158,67 @@ final class RuleUpdater {
         }
     }
 
-    private static Validated validateProfile(
+    /**
+     * Validates one region's three profiles and returns only its strict set.
+     *
+     * Monotonicity makes strict a superset of lean and balanced, so no later
+     * check needs the two smaller sets. Returning just the strict one lets them
+     * be collected before the next region is read, which keeps peak memory at
+     * two large sets rather than six.
+     */
+    private static Set<String> validateRegion(
+            File directory, JSONObject profiles, String region, String label) throws Exception {
+        Set<String> balanced;
+        {
+            Set<String> lean = validateProfile(directory, profiles, region, "lean");
+            balanced = validateProfile(directory, profiles, region, "balanced");
+            if (!balanced.containsAll(lean))
+                throw new SecurityException(label + " profiles are not monotonic");
+        }
+        Set<String> strict = validateProfile(directory, profiles, region, "strict");
+        if (!strict.containsAll(balanced))
+            throw new SecurityException(label + " profiles are not monotonic");
+        return strict;
+    }
+
+    private static Set<String> validateProfile(
             File directory, JSONObject profiles, String region, String level) throws Exception {
         return validateFile(directory, region + "-" + level + ".domains",
                 profiles.getJSONObject(region).getJSONObject(level));
     }
 
-    private record Validated(Set<String> domains) {}
-
-    private static Validated validateFile(File directory, String name, JSONObject metadata) throws Exception {
+    private static Set<String> validateFile(File directory, String name, JSONObject metadata) throws Exception {
         File file = new File(directory, name);
         String expected = metadata.getString("domains_sha256").toLowerCase(Locale.ROOT);
+        int expectedRules = metadata.getInt("rules");
+        if (expectedRules < 0 || expectedRules > 500_000)
+            throw new SecurityException("Too many rules");
+        // One pass hashes and parses together; the digest sees the raw bytes
+        // before the reader decodes them, and nothing is returned until the
+        // checksum has been verified below.
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        try (FileInputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[32 * 1024];
-            int read;
-            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
-        }
-        String actual = hex(digest.digest());
-        if (!expected.equals(actual)) throw new SecurityException(name + " checksum mismatch");
-        Set<String> domains = new HashSet<>();
+        Set<String> domains = new HashSet<>(expectedRules * 4 / 3 + 16);
+        Matcher domainMatcher = EXACT_DOMAIN.matcher("");
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(file), StandardCharsets.UTF_8))) {
+                new DigestInputStream(new FileInputStream(file), digest),
+                StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String value = line.trim();
                 if (value.isEmpty() || value.startsWith("#")) continue;
-                if (value.length() > 253 || !value.matches(
-                        "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+"))
+                if (value.length() > 253 || !domainMatcher.reset(value).matches())
                     throw new SecurityException("Invalid exact domain in " + name);
                 if (!domains.add(value))
                     throw new SecurityException("Duplicate domain in " + name);
-                if (domains.size() > 500_000)
-                    throw new SecurityException("Too many rules");
+                if (domains.size() > expectedRules)
+                    throw new SecurityException(name + " count mismatch");
             }
         }
-        if (domains.size() != metadata.getInt("rules"))
+        String actual = Hex.encode(digest.digest());
+        if (!expected.equals(actual)) throw new SecurityException(name + " checksum mismatch");
+        if (domains.size() != expectedRules)
             throw new SecurityException(name + " count mismatch");
-        return new Validated(domains);
-    }
-
-    private static boolean disjoint(Set<String> first, Set<String> second) {
-        for (String domain : second) if (first.contains(domain)) return false;
-        return true;
+        return domains;
     }
 
     private static void extractDataOnly(File archive, File directory) throws Exception {
@@ -212,6 +226,7 @@ final class RuleUpdater {
         long total = 0;
         try (ZipInputStream input = new ZipInputStream(
                 new BufferedInputStream(new FileInputStream(archive)))) {
+            byte[] buffer = new byte[16 * 1024];
             ZipEntry entry;
             while ((entry = input.getNextEntry()) != null) {
                 String name = entry.getName();
@@ -219,7 +234,6 @@ final class RuleUpdater {
                     throw new SecurityException("Unsafe rules archive entry: " + name);
                 File target = new File(directory, name);
                 try (FileOutputStream output = new FileOutputStream(target)) {
-                    byte[] buffer = new byte[16 * 1024];
                     int read;
                     while ((read = input.read(buffer)) != -1) {
                         total += read;
@@ -231,12 +245,6 @@ final class RuleUpdater {
             }
         }
         if (!seen.equals(ARCHIVE_FILES)) throw new SecurityException("Rules archive is incomplete");
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder value = new StringBuilder(bytes.length * 2);
-        for (byte item : bytes) value.append(String.format(Locale.ROOT, "%02x", item));
-        return value.toString();
     }
 
     private static void deleteTree(File file) {
