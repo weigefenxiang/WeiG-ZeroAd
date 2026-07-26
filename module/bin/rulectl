@@ -12,9 +12,8 @@ if [ "${ADSHIELD_TEST_MODE:-0}" = "1" ]; then
 fi
 STATE_DIR=$DATA_DIR/state
 USER_DIR=$DATA_DIR/user
-BACKUP_DIR=$DATA_DIR/backups
 ACTIVE_HOSTS=$STATE_DIR/active.hosts
-PROFILE_STATE=$STATE_DIR/profile
+ACTIVE_STATS=$STATE_DIR/active.stats
 CN_PROFILE_STATE=$STATE_DIR/cn_profile
 CN_LAST_PROFILE_STATE=$STATE_DIR/cn_profile_last
 GLOBAL_PROFILE_STATE=$STATE_DIR/global_profile
@@ -24,6 +23,7 @@ RULE_VERSION_STATE=$STATE_DIR/rule_version
 PROTECTION_STARTED_STATE=$STATE_DIR/protection_started_at
 EVENT_LOG=$STATE_DIR/events.log
 ENABLED_PACKS_STATE=$USER_DIR/packs.enabled
+LOCK_DIR=$STATE_DIR/.rulectl.lock
 RULE_FILES="cn-lean.domains cn-balanced.domains cn-strict.domains global-lean.domains global-balanced.domains global-strict.domains reward-ads.domains reward-tencent.domains reward-wechat.domains reward-short-video.domains reward-other.domains manifest.json packs.json"
 
 fail() {
@@ -31,9 +31,36 @@ fail() {
   exit 1
 }
 
+release_lock() {
+  [ "${LOCK_HELD:-0}" = "1" ] || return 0
+  rm -rf "$LOCK_DIR"
+  LOCK_HELD=0
+}
+
+acquire_lock() {
+  [ "${ADSHIELD_LOCK_HELD:-0}" != "1" ] || return 0
+  waited=0
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    owner=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    case "$owner" in
+      ''|*[!0-9]*) rm -rf "$LOCK_DIR"; continue ;;
+    esac
+    if ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
+    [ "$waited" -lt 10 ] || fail "another rule operation is still running"
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo $$ > "$LOCK_DIR/pid"
+  LOCK_HELD=1
+  trap release_lock EXIT HUP INT TERM
+}
+
 ensure_state() {
-  mkdir -p "$STATE_DIR" "$USER_DIR" "$BACKUP_DIR" || fail "cannot create state directory"
-  chmod 0700 "$DATA_DIR" "$STATE_DIR" "$USER_DIR" "$BACKUP_DIR" 2>/dev/null
+  mkdir -p "$STATE_DIR" "$USER_DIR" || fail "cannot create state directory"
+  chmod 0700 "$DATA_DIR" "$STATE_DIR" "$USER_DIR" 2>/dev/null
   touch "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE"
   touch "$EVENT_LOG"
   chmod 0600 "$USER_DIR/allow.txt" "$USER_DIR/block.txt" "$USER_DIR/disabled.txt" "$ENABLED_PACKS_STATE" 2>/dev/null
@@ -141,6 +168,19 @@ write_reward_union() {
   rm -f "$raw"
 }
 
+write_enabled_reward_union() {
+  output=$1
+  raw=$output.raw
+  : > "$raw"
+  while IFS= read -r pack_id; do
+    [ -n "$pack_id" ] || continue
+    source=$(pack_path "$pack_id") || continue
+    cat "$source" >> "$raw"
+  done < "$ENABLED_PACKS_STATE"
+  sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$raw" | awk '!seen[$0]++' > "$output"
+  rm -f "$raw"
+}
+
 count_domains() {
   [ -f "$1" ] || { echo 0; return; }
   awk '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$1"
@@ -227,17 +267,35 @@ install_rule_directory() {
 
   rules_root=$DATA_DIR/rules
   pending=$rules_root/.pending.$$
+  old=$rules_root/.old.$$
   mkdir -p "$pending" || fail "cannot create rule staging area"
   for name in $RULE_FILES; do
     cp -f "$source_dir/$name" "$pending/$name" || fail "cannot stage $name"
   done
   chmod 0600 "$pending"/* 2>/dev/null
-  rm -rf "$rules_root/previous"
-  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$rules_root/previous"
-  mv "$pending" "$rules_root/current" || fail "cannot activate rules"
+  old_version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
+  case "$old_version" in ''|*[!0-9]*) old_version=0 ;; esac
+  rm -rf "$old"
+  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$old" ||
+    fail "cannot preserve current rules"
+  if ! mv "$pending" "$rules_root/current"; then
+    [ ! -d "$old" ] || mv "$old" "$rules_root/current"
+    fail "cannot activate rules"
+  fi
   echo "$version" > "$RULE_VERSION_STATE"
+  if build_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1); then
+    rm -rf "$rules_root/previous"
+    [ ! -d "$old" ] || mv "$old" "$rules_root/previous"
+  else
+    rm -rf "$rules_root/current"
+    [ ! -d "$old" ] || mv "$old" "$rules_root/current"
+    echo "$old_version" > "$RULE_VERSION_STATE"
+    restore_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1) ||
+      fail "new rules failed and previous rules could not be restored: $restore_output"
+    rm -rf "$source_dir"
+    fail "new rules failed; previous rules were restored: $build_output"
+  fi
   rm -rf "$source_dir"
-  build_active
   log_event "rules-installed version=$version"
   status_json
 }
@@ -245,14 +303,29 @@ install_rule_directory() {
 rollback_rules() {
   rules_root=$DATA_DIR/rules
   [ -d "$rules_root/previous" ] || fail "no previous rule version is available"
-  rollback=$rules_root/.rollback.$$
-  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$rollback"
-  mv "$rules_root/previous" "$rules_root/current" || fail "cannot restore previous rules"
-  mv "$rollback" "$rules_root/previous" 2>/dev/null
+  rollback=$rules_root/.rollback-current.$$
+  old_version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
+  case "$old_version" in ''|*[!0-9]*) old_version=0 ;; esac
+  rm -rf "$rollback"
+  [ ! -d "$rules_root/current" ] || mv "$rules_root/current" "$rollback" ||
+    fail "cannot preserve current rules"
+  if ! mv "$rules_root/previous" "$rules_root/current"; then
+    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/current"
+    fail "cannot restore previous rules"
+  fi
   version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$rules_root/current/manifest.json" | head -n 1)
   case "$version" in ''|*[!0-9]*) version=0 ;; esac
   echo "$version" > "$RULE_VERSION_STATE"
-  build_active
+  if build_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1); then
+    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/previous"
+  else
+    rm -rf "$rules_root/current"
+    [ ! -d "$rollback" ] || mv "$rollback" "$rules_root/current"
+    echo "$old_version" > "$RULE_VERSION_STATE"
+    restore_output=$(ADSHIELD_LOCK_HELD=1 "$MODDIR/bin/rulectl" __build 2>&1) ||
+      fail "rollback failed and current rules could not be restored: $restore_output"
+    fail "rollback failed; current rules were restored: $build_output"
+  fi
   log_event "rules-rollback version=$version"
   status_json
 }
@@ -312,6 +385,7 @@ build_active() {
   mkdir -p "$tmp_dir" || fail "cannot create temporary directory"
   skip_file=$tmp_dir/skip
   reward_file=$tmp_dir/reward
+  enabled_reward_file=$tmp_dir/enabled-reward
   base_file=$tmp_dir/base
   pack_file=$tmp_dir/packs
   block_file=$tmp_dir/block
@@ -321,6 +395,7 @@ build_active() {
   cat "$USER_DIR/allow.txt" "$USER_DIR/disabled.txt" 2>/dev/null | \
     sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$skip_file"
   write_reward_union "$reward_file"
+  write_enabled_reward_union "$enabled_reward_file"
   {
     [ -z "$cn_file" ] || cat "$cn_file"
     [ -z "$global_file" ] || cat "$global_file"
@@ -332,11 +407,7 @@ build_active() {
   reward_until=$(cat "$REWARD_UNTIL_STATE" 2>/dev/null)
   case "$reward_until" in ''|*[!0-9]*) reward_until=0 ;; esac
   if [ "$reward_until" -le "$now" ]; then
-    while IFS= read -r pack_id; do
-      [ -n "$pack_id" ] || continue
-      source=$(pack_path "$pack_id") || continue
-      cat "$source" >> "$pack_file"
-    done < "$ENABLED_PACKS_STATE"
+    cp -f "$enabled_reward_file" "$pack_file"
   fi
   cat "$base_file" "$pack_file" "$USER_DIR/block.txt" 2>/dev/null | \
     sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$block_file"
@@ -347,7 +418,9 @@ build_active() {
     : > "$filtered_file"
   fi
 
+  compiled=$(count_domains "$base_file")
   running=$(count_domains "$filtered_file")
+  reward_block=$(count_domains "$enabled_reward_file")
   version=$(cat "$RULE_VERSION_STATE" 2>/dev/null)
   {
     echo "# WeiG ZeroAd active hosts. Managed by rulectl."
@@ -361,6 +434,13 @@ build_active() {
   } > "$output_file" || fail "cannot build active hosts"
 
   publish_active "$output_file"
+  stats_tmp=$ACTIVE_STATS.$$
+  {
+    echo "compiled=$compiled"
+    echo "running=$running"
+    echo "reward_block=$reward_block"
+  } > "$stats_tmp" && mv -f "$stats_tmp" "$ACTIVE_STATS"
+  chmod 0600 "$ACTIVE_STATS" 2>/dev/null
   rm -rf "$tmp_dir"
   log_event "applied cn=$cn_profile global=$global_profile running=$running"
 }
@@ -491,17 +571,23 @@ status_json() {
   [ "$cn_profile" = "off" ] || cn_file=$(profile_path cn "$cn_profile" 2>/dev/null)
   global_file=
   [ "$global_profile" = "off" ] || global_file=$(profile_path global "$global_profile" 2>/dev/null)
-  reward_all_tmp=$STATE_DIR/.reward-all.$$
-  profile_all_tmp=$STATE_DIR/.profiles-all.$$
-  write_reward_union "$reward_all_tmp"
-  {
-    [ -z "$cn_file" ] || cat "$cn_file" 2>/dev/null
-    [ -z "$global_file" ] || cat "$global_file" 2>/dev/null
-  } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$profile_all_tmp"
-  compiled=$(awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { count++ } END { print count + 0 }' \
-    "$reward_all_tmp" "$profile_all_tmp")
-  rm -f "$reward_all_tmp" "$profile_all_tmp"
-  running=$(count_running)
+  compiled=$(sed -n 's/^compiled=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
+  running=$(sed -n 's/^running=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
+  reward_block=$(sed -n 's/^reward_block=//p' "$ACTIVE_STATS" 2>/dev/null | head -n 1)
+  case "$compiled" in ''|*[!0-9]*)
+    reward_all_tmp=$STATE_DIR/.reward-all.$$
+    profile_all_tmp=$STATE_DIR/.profiles-all.$$
+    write_reward_union "$reward_all_tmp"
+    {
+      [ -z "$cn_file" ] || cat "$cn_file" 2>/dev/null
+      [ -z "$global_file" ] || cat "$global_file" 2>/dev/null
+    } | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' | awk '!seen[$0]++' > "$profile_all_tmp"
+    compiled=$(awk 'NR == FNR { reward[$1] = 1; next } !/^[[:space:]]*(#|$)/ && !($1 in reward) { count++ } END { print count + 0 }' \
+      "$reward_all_tmp" "$profile_all_tmp")
+    rm -f "$reward_all_tmp" "$profile_all_tmp"
+    ;;
+  esac
+  case "$running" in ''|*[!0-9]*) running=$(count_running) ;; esac
   disabled=$(count_domains "$USER_DIR/disabled.txt")
   user_block=$(count_domains "$USER_DIR/block.txt")
   user_allow=$(count_domains "$USER_DIR/allow.txt")
@@ -510,17 +596,19 @@ status_json() {
   case "$reward_until" in ''|*[!0-9]*) reward_until=0 ;; esac
   now=$(date +%s)
   [ "$reward_until" -gt "$now" ] && reward_active=true || reward_active=false
-  pack_tmp=$STATE_DIR/.packs.$$
-  : > "$pack_tmp"
   enabled_packs=
   while IFS= read -r pack_id; do
     [ -n "$pack_id" ] || continue
     source=$(pack_path "$pack_id") || continue
-    cat "$source" >> "$pack_tmp"
     [ -z "$enabled_packs" ] && enabled_packs=$pack_id || enabled_packs=$enabled_packs,$pack_id
   done < "$ENABLED_PACKS_STATE"
-  reward_block=$(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$pack_tmp" | awk '!seen[$0]++ { count++ } END { print count + 0 }')
-  rm -f "$pack_tmp"
+  case "$reward_block" in ''|*[!0-9]*)
+    pack_tmp=$STATE_DIR/.packs.$$
+    write_enabled_reward_union "$pack_tmp"
+    reward_block=$(count_domains "$pack_tmp")
+    rm -f "$pack_tmp"
+    ;;
+  esac
   [ "$(cat "$PROTECTION_STATE" 2>/dev/null)" = "1" ] && protection=true || protection=false
   if [ -d /data/adb/modules_update/weig_rootad ] || [ -f /data/adb/modules/weig_rootad/update ]; then
     pending_reboot=true
@@ -540,8 +628,9 @@ status_json() {
     "$pending_reboot" "$protection" "$healthy" "$root_impl" "$core_version" "$core_version_code" "$cn_profile" "$global_profile" "$version" "$rules_downloaded" "$compiled" "$running" "$disabled" "$user_block" "$user_allow" "$reward_block" "$reward_active" "$reward_until" "$enabled_packs"
 }
 
-ensure_state
 command=${1:-status}
+ensure_state
+acquire_lock
 
 case "$command" in
   status)
@@ -554,6 +643,10 @@ case "$command" in
   rebuild)
     build_active
     status_json
+    ;;
+  __build)
+    [ "${ADSHIELD_LOCK_HELD:-0}" = "1" ] || fail "internal command"
+    build_active
     ;;
   cn-profile)
     [ -n "${2:-}" ] || fail "domestic profile name is required"
@@ -651,12 +744,6 @@ case "$command" in
   rules-rollback)
     rollback_rules
     ;;
-  keep-user-rules)
-    touch "$STATE_DIR/keep_user_rules"
-    ;;
-  discard-user-rules)
-    rm -f "$STATE_DIR/keep_user_rules"
-    ;;
   list-disabled)
     cat "$USER_DIR/disabled.txt"
     ;;
@@ -673,7 +760,7 @@ case "$command" in
     if [ "$TEST_MODE" = "1" ]; then
       rm -f "$HOSTS_TARGET"
     elif same_file; then
-      umount "$HOSTS_TARGET" >/dev/null 2>&1 || true
+      umount "$HOSTS_TARGET" >/dev/null 2>&1 || fail "cannot unmount active hosts"
     fi
     ;;
   *)

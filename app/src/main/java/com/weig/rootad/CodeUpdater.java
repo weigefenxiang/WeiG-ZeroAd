@@ -28,20 +28,23 @@ final class CodeUpdater {
         if (manifestAsset == null)
             throw new IllegalStateException("Release has no update manifest");
         File file = ReleaseClient.download(context, manifestAsset, 1024L * 1024L);
-        JSONObject manifest = new JSONObject(new String(
-                Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
-        if (manifest.getInt("schema") != 1)
-            throw new SecurityException("Unsupported update manifest");
-        if (!manifest.getString("channel").equals(BuildConfig.UPDATE_CHANNEL))
-            throw new SecurityException("Update channel mismatch");
-        if (!manifest.getString("tag").equals(release.tag()))
-            throw new SecurityException("Update release tag mismatch");
-        Component manager = component(
-                release, manifest.getJSONObject("manager"), "zeroad-manager", ".apk");
-        Component core = component(
-                release, manifest.getJSONObject("core"), "core-only", ".zip");
-        file.delete();
-        return new Available(manager, core);
+        try {
+            JSONObject manifest = new JSONObject(new String(
+                    Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
+            if (manifest.getInt("schema") != 1)
+                throw new SecurityException("Unsupported update manifest");
+            if (!manifest.getString("channel").equals(BuildConfig.UPDATE_CHANNEL))
+                throw new SecurityException("Update channel mismatch");
+            if (!manifest.getString("tag").equals(release.tag()))
+                throw new SecurityException("Update release tag mismatch");
+            Component manager = component(
+                    release, manifest.getJSONObject("manager"), "zeroad-manager", ".apk");
+            Component core = component(
+                    release, manifest.getJSONObject("core"), "core-only", ".zip");
+            return new Available(manager, core);
+        } finally {
+            file.delete();
+        }
     }
 
     private static Component component(

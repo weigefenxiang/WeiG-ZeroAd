@@ -9,7 +9,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.1.3
+        default: v0.1.4
 
 permissions:
   contents: write
@@ -93,6 +93,8 @@ jobs:
           "$APKSIGNER" verify --verbose app/build/outputs/apk/release/app-release.apk
           python -m rule_tools.build_rules
           python -m unittest discover -s tests -v
+          bash -n module/*.sh module/bin/rulectl module/META-INF/com/google/android/update-binary
+          bash tests/runtime_module.sh
           APK="dist/WeiG-ZeroAd-Manager-${ASSET_TAG}.apk"
           PACKAGE="dist/WeiG-ZeroAd-${ASSET_TAG}.zip"
           CORE="dist/WeiG-ZeroAd-${ASSET_TAG}-core-only.zip"

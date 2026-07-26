@@ -18,10 +18,11 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.OutputStream;
 import java.util.Locale;
+import java.util.UUID;
 
 final class ApkInstaller {
     interface Callback { void completed(String message, boolean success); }
-    private static final String ACTION = "com.weig.rootad.INSTALL_RESULT";
+    private static final String ACTION_PREFIX = "com.weig.rootad.INSTALL_RESULT.";
 
     private ApkInstaller() {}
 
@@ -31,11 +32,13 @@ final class ApkInstaller {
             Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:" + activity.getPackageName()));
             activity.startActivity(settings);
+            apk.delete();
             callback.completed(message(
                     "请允许 WeiG ZeroAd 安装应用，然后再次点击更新。",
                     "Allow WeiG ZeroAd to install apps, then tap update again."), false);
             return;
         }
+        String resultAction = ACTION_PREFIX + UUID.randomUUID();
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
@@ -78,10 +81,12 @@ final class ApkInstaller {
             }
         };
         if (Build.VERSION.SDK_INT >= 33) {
-            activity.registerReceiver(receiver, new IntentFilter(ACTION), Context.RECEIVER_NOT_EXPORTED);
+            activity.registerReceiver(
+                    receiver, new IntentFilter(resultAction), Context.RECEIVER_NOT_EXPORTED);
         } else {
-            // The PendingIntent is explicit to this package; Android 12 has no receiver export flag overload.
-            activity.registerReceiver(receiver, new IntentFilter(ACTION));
+            // Android 12 has no receiver export flag overload. The per-install random
+            // action and package-scoped PendingIntent prevent a predictable spoof target.
+            activity.registerReceiver(receiver, new IntentFilter(resultAction));
         }
 
         PackageInstaller installer = activity.getPackageManager().getPackageInstaller();
@@ -103,16 +108,18 @@ final class ApkInstaller {
                 }
 
                 // PackageInstaller rejects commit() while an APK stream is still open.
-                Intent result = new Intent(ACTION).setPackage(activity.getPackageName());
+                Intent result = new Intent(resultAction).setPackage(activity.getPackageName());
                 PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, result,
                         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
                 session.commit(pending.getIntentSender());
+                apk.delete();
             }
         } catch (Exception error) {
             if (sessionId >= 0) {
                 try { installer.abandonSession(sessionId); } catch (Exception ignored) {}
             }
             unregister(activity, receiver);
+            apk.delete();
             throw error;
         }
     }

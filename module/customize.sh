@@ -4,7 +4,7 @@ ui_print "- Installing WeiG ZeroAd"
 ui_print "- Creating persistent state"
 
 DATA_DIR=/data/adb/weig_rootad
-mkdir -p "$DATA_DIR/state" "$DATA_DIR/user" "$DATA_DIR/backups" "$DATA_DIR/diagnostics"
+mkdir -p "$DATA_DIR/state" "$DATA_DIR/user"
 touch "$DATA_DIR/user/allow.txt" "$DATA_DIR/user/block.txt" "$DATA_DIR/user/disabled.txt" \
   "$DATA_DIR/user/packs.enabled"
 

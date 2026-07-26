@@ -156,10 +156,14 @@ def install_live_rules(staging: Path, rules_zip: Path) -> None:
         (rules_dir / name).write_bytes(blobs[name])
 
 
-def install_offline_rules(staging: Path, generated: Path, required: list[Path]) -> None:
+def install_offline_rules(staging: Path, generated: Path) -> None:
     rules_dir = staging / "rules"
-    for path in required:
-        shutil.copy2(path, rules_dir / path.name)
+    for name in (
+        "manifest.json", "packs.json",
+        "reward-tencent.domains", "reward-wechat.domains",
+        "reward-short-video.domains", "reward-other.domains",
+    ):
+        shutil.copy2(generated / name, rules_dir / name)
     # Safe first-install fallback built only from Wei.G 20260723 and local overrides.
     shutil.copy2(generated / "balanced.domains", rules_dir / "cn-lean.domains")
     shutil.copy2(generated / "balanced.domains", rules_dir / "cn-balanced.domains")
@@ -206,7 +210,7 @@ def build(
         staging = Path(temp_dir) / "module"
         shutil.copytree(module, staging)
         (staging / "rules").mkdir(parents=True, exist_ok=True)
-        install_offline_rules(staging, generated, required)
+        install_offline_rules(staging, generated)
         rules_mode = "offline-fallback"
         if rules_zip is not None:
             try:
@@ -216,7 +220,7 @@ def build(
                 if not allow_rules_fallback:
                     raise
                 # Restore every runtime file in case copying the live set was interrupted.
-                install_offline_rules(staging, generated, required)
+                install_offline_rules(staging, generated)
                 fallback_warning(error)
         shutil.copy2(generated / "strict.hosts", staging / "system/etc/hosts")
         if manager_apk is not None:
@@ -252,7 +256,7 @@ def main() -> None:
     )
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument(
-        "--output", type=Path, default=Path("dist/WeiG-ZeroAd-v0.1.0-core-only.zip")
+        "--output", type=Path, default=Path("dist/WeiG-ZeroAd-v0.1.4-core-only.zip")
     )
     parser.add_argument(
         "--manager-apk", type=Path,

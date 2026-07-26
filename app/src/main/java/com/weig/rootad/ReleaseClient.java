@@ -11,6 +11,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
@@ -18,10 +20,6 @@ import java.util.Locale;
 final class ReleaseClient {
     record Asset(String name, String url, long size, String digest) {}
     record Release(String tag, Asset[] assets) {
-        Asset endingWith(String suffix) {
-            for (Asset asset : assets) if (asset.name.toLowerCase(Locale.ROOT).endsWith(suffix)) return asset;
-            return null;
-        }
         Asset matching(String fragment, String suffix) {
             String part = fragment.toLowerCase(Locale.ROOT);
             String ending = suffix.toLowerCase(Locale.ROOT);
@@ -94,28 +92,59 @@ final class ReleaseClient {
             Context context, Asset asset, long maximumBytes, String expectedSha256) throws Exception {
         if (asset.size > maximumBytes) throw new IllegalArgumentException("Release asset is too large");
         File target = new File(context.getCacheDir(), safeName(asset.name));
-        byte[] bytes = get(new URL(asset.url), maximumBytes);
-        String actual = hex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        if (asset.digest.startsWith("sha256:")) {
-            String expected = asset.digest.substring(7).toLowerCase(Locale.ROOT);
-            if (!expected.equals(actual)) throw new SecurityException("GitHub asset digest mismatch");
+        File temporary = new File(context.getCacheDir(), safeName(asset.name) + ".part");
+        temporary.delete();
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        try {
+            downloadToFile(new URL(asset.url), temporary, maximumBytes, asset.size, sha256);
+            String actual = hex(sha256.digest());
+            if (asset.digest.startsWith("sha256:")) {
+                String expected = asset.digest.substring(7).toLowerCase(Locale.ROOT);
+                if (!expected.equals(actual))
+                    throw new SecurityException("GitHub asset digest mismatch");
+            }
+            if (!expectedSha256.isEmpty() &&
+                    !expectedSha256.toLowerCase(Locale.ROOT).equals(actual))
+                throw new SecurityException("Update manifest checksum mismatch");
+            Files.move(temporary.toPath(), target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING);
+            return target;
+        } finally {
+            temporary.delete();
         }
-        if (!expectedSha256.isEmpty() &&
-                !expectedSha256.toLowerCase(Locale.ROOT).equals(actual))
-            throw new SecurityException("Update manifest checksum mismatch");
-        try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(bytes); }
-        return target;
+    }
+
+    private static void downloadToFile(
+            URL url, File target, long maximumBytes, long expectedBytes,
+            MessageDigest sha256) throws Exception {
+        HttpURLConnection connection = open(url);
+        long declared = connection.getContentLengthLong();
+        if (declared > maximumBytes) {
+            connection.disconnect();
+            throw new IllegalArgumentException("Download exceeds size limit");
+        }
+        long total = 0;
+        try (BufferedInputStream input = new BufferedInputStream(connection.getInputStream());
+             FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > maximumBytes)
+                    throw new IllegalArgumentException("Download exceeds size limit");
+                sha256.update(buffer, 0, read);
+                output.write(buffer, 0, read);
+            }
+            output.getFD().sync();
+        } finally {
+            connection.disconnect();
+        }
+        if (expectedBytes > 0 && total != expectedBytes)
+            throw new SecurityException("Downloaded asset size mismatch");
     }
 
     private static byte[] get(URL url, long maximumBytes) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setConnectTimeout(15_000);
-        connection.setReadTimeout(30_000);
-        connection.setRequestProperty("Accept", "application/vnd.github+json");
-        connection.setRequestProperty("User-Agent", "WeiG-ZeroAd/" + BuildConfig.VERSION_NAME);
-        connection.setInstanceFollowRedirects(true);
-        int code = connection.getResponseCode();
-        if (code < 200 || code >= 300) throw new IllegalStateException("GitHub returned HTTP " + code);
+        HttpURLConnection connection = open(url);
         try (BufferedInputStream input = new BufferedInputStream(connection.getInputStream());
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[16 * 1024];
@@ -130,6 +159,21 @@ final class ReleaseClient {
         } finally {
             connection.disconnect();
         }
+    }
+
+    private static HttpURLConnection open(URL url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(15_000);
+        connection.setReadTimeout(30_000);
+        connection.setRequestProperty("Accept", "application/vnd.github+json");
+        connection.setRequestProperty("User-Agent", "WeiG-ZeroAd/" + BuildConfig.VERSION_NAME);
+        connection.setInstanceFollowRedirects(true);
+        int code = connection.getResponseCode();
+        if (code < 200 || code >= 300) {
+            connection.disconnect();
+            throw new IllegalStateException("GitHub returned HTTP " + code);
+        }
+        return connection;
     }
 
     private static String safeName(String value) {

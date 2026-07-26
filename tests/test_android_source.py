@@ -74,6 +74,7 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn("dist/update-manifest.json", workflow)
         self.assertIn('"sha256": digest', workflow)
         self.assertIn("component.sha256()", updater)
+        self.assertIn("bash tests/runtime_module.sh", workflow)
 
     def test_status_contract_supports_domestic_off_and_downloaded_rules(self) -> None:
         schema = json.loads((ROOT / "api/status.schema.json").read_text(encoding="utf-8"))
@@ -95,6 +96,45 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertIn(".commit();", activity)
         self.assertNotIn("applyOverrideConfiguration", activity)
         self.assertNotIn("setSingleChoiceItems", activity)
+
+    def test_theme_recreation_reuses_status_without_a_root_refresh(self) -> None:
+        activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("record RetainedState", activity)
+        self.assertIn("onRetainNonConfigurationInstance()", activity)
+        self.assertIn("skipResumeRefresh = saved.themeRecreation()", activity)
+        self.assertIn("showStatus(saved.status())", activity)
+        self.assertIn("if (skipResumeRefresh)", activity)
+        self.assertIn("themeRecreation = true", activity)
+        self.assertIn("if (!destroyed && !isFinishing()) action.run()", activity)
+
+    def test_large_updates_are_streamed_and_temporary_files_are_cleaned(self) -> None:
+        client = (ROOT / "app/src/main/java/com/weig/rootad/ReleaseClient.java").read_text(
+            encoding="utf-8"
+        )
+        updater = (ROOT / "app/src/main/java/com/weig/rootad/RuleUpdater.java").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("downloadToFile(", client)
+        self.assertIn("MessageDigest sha256", client)
+        self.assertIn('safeName(asset.name) + ".part"', client)
+        self.assertNotIn("byte[] bytes = get(new URL(asset.url)", client)
+        self.assertIn("try (BufferedReader reader", updater)
+        self.assertIn("finally {", updater)
+        self.assertIn("deleteTree(extracted)", updater)
+        self.assertIn('RootShell.run("rm -rf " + RootShell.quote(remote))', updater)
+
+    def test_core_serializes_operations_and_caches_status_counts(self) -> None:
+        core = (ROOT / "module/bin/rulectl").read_text(encoding="utf-8")
+        uninstall = (ROOT / "module/uninstall.sh").read_text(encoding="utf-8")
+        self.assertIn("acquire_lock()", core)
+        self.assertIn("another rule operation is still running", core)
+        self.assertIn("ACTIVE_STATS=$STATE_DIR/active.stats", core)
+        self.assertIn("new rules failed; previous rules were restored", core)
+        self.assertIn('umount "$HOSTS_TARGET"', core)
+        self.assertNotIn("keep-user-rules)", core)
+        self.assertNotIn("keep_user_rules", uninstall)
 
     def test_support_section_exposes_safe_logs_and_issue_diagnostics(self) -> None:
         activity = (ROOT / "app/src/main/java/com/weig/rootad/MainActivity.java").read_text(
@@ -133,14 +173,16 @@ class AndroidStartupSourceTests(unittest.TestCase):
         self.assertLess(stream_scope_end, commit)
         self.assertIn("installer.abandonSession(sessionId)", installer)
         self.assertIn("APK 安装失败：", installer)
+        self.assertIn("ACTION_PREFIX + UUID.randomUUID()", installer)
+        self.assertIn("new Intent(resultAction).setPackage", installer)
 
-    def test_manager_hotfix_has_a_new_update_version(self) -> None:
+    def test_manager_and_core_fixes_have_new_update_versions(self) -> None:
         gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
         module = (ROOT / "module/module.prop").read_text(encoding="utf-8")
-        self.assertIn('versionName = "0.1.3"', gradle)
-        self.assertIn("versionCode = 6", gradle)
-        self.assertIn("version=0.1.1", module)
-        self.assertIn("versionCode=3", module)
+        self.assertIn('versionName = "0.1.4"', gradle)
+        self.assertIn("versionCode = 7", gradle)
+        self.assertIn("version=0.1.2", module)
+        self.assertIn("versionCode=4", module)
 
     def test_readme_is_chinese_first_and_hides_git_publish_details(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -147,6 +147,9 @@ class ModuleBuildTests(unittest.TestCase):
                 self.assertIn("rules/cn-lean.domains", names)
                 self.assertIn("rules/global-strict.domains", names)
                 self.assertIn("rules/reward-ads.domains", names)
+                self.assertNotIn("rules/strict.domains", names)
+                self.assertNotIn("rules/balanced.domains", names)
+                self.assertNotIn("rules/reward.domains", names)
                 self.assertEqual((archive.getinfo("bin/rulectl").external_attr >> 16) & 0o777, 0o755)
                 self.assertEqual((archive.getinfo("module.prop").external_attr >> 16) & 0o777, 0o644)
 

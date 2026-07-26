@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
             String rulesError,
             String codeError
     ) {}
+    private record RetainedState(RootStatus status, boolean themeRecreation) {}
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -66,6 +67,9 @@ public final class MainActivity extends Activity {
     private CheckBox rewardTencent, rewardWechat, rewardShortVideo, rewardOther;
     private RootStatus latest;
     private boolean updatingUi;
+    private boolean themeRecreation;
+    private boolean skipResumeRefresh;
+    private boolean destroyed;
     private final Runnable countdownTick = new Runnable() {
         @Override public void run() {
             if (latest == null || !latest.rewardTemporarilyAllowed()) return;
@@ -117,11 +121,28 @@ public final class MainActivity extends Activity {
                     WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
             controller.setSystemBarsAppearance(dark ? 0 : light, light);
         }
+        Object retained = getLastNonConfigurationInstance();
+        if (retained instanceof RetainedState saved && saved.status() != null) {
+            skipResumeRefresh = saved.themeRecreation();
+            showStatus(saved.status());
+        }
     }
 
-    @Override protected void onResume() { super.onResume(); refresh(); }
+    @Override protected void onResume() {
+        super.onResume();
+        if (skipResumeRefresh) {
+            skipResumeRefresh = false;
+            return;
+        }
+        refresh();
+    }
+
+    @Override public Object onRetainNonConfigurationInstance() {
+        return new RetainedState(latest, themeRecreation);
+    }
 
     @Override protected void onDestroy() {
+        destroyed = true;
         main.removeCallbacks(countdownTick);
         worker.shutdownNow();
         super.onDestroy();
@@ -137,6 +158,7 @@ public final class MainActivity extends Activity {
             toast(t("无法保存主题设置", "Cannot save theme setting"));
             return;
         }
+        themeRecreation = true;
         recreate();
     }
 
@@ -149,6 +171,7 @@ public final class MainActivity extends Activity {
             return;
         }
         toast(t("已恢复跟随系统", "Following system theme"));
+        themeRecreation = true;
         recreate();
     }
 
@@ -317,7 +340,7 @@ public final class MainActivity extends Activity {
         busy(true, t("读取核心状态…", "Reading core status…"));
         worker.execute(() -> {
             RootStatus status = RootStatus.read();
-            main.post(() -> showStatus(status));
+            postUi(() -> showStatus(status));
         });
     }
 
@@ -412,7 +435,7 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             RootShell.Result result = RootShell.runControl(command);
             RootStatus status = result.ok() ? RootStatus.fromResult(result) : RootStatus.read();
-            main.post(() -> {
+            postUi(() -> {
                 if (!result.ok()) toast(result.output());
                 showStatus(status);
             });
@@ -462,7 +485,7 @@ public final class MainActivity extends Activity {
         busy(true, t("正在检查规则、管理器和核心…", "Checking rules, manager, and core…"));
         worker.execute(() -> {
             UpdateCheck result = performUpdateCheck();
-            main.post(() -> showUpdateCheck(result));
+            postUi(() -> showUpdateCheck(result));
         });
     }
 
@@ -558,13 +581,13 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 RuleUpdater.Result result = RuleUpdater.install(this, available);
-                main.post(() -> {
+                postUi(() -> {
                     toast(t("规则已更新：", "Rules updated: ") +
                             formatRuleVersion(result.version()));
                     refresh();
                 });
             } catch (Exception error) {
-                main.post(() -> rulesUpdateFailed(error));
+                postUi(() -> rulesUpdateFailed(error));
             }
         });
     }
@@ -574,12 +597,12 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 File file = CodeUpdater.download(this, manager, 80L * 1024 * 1024);
-                main.post(() -> {
+                postUi(() -> {
                     busy(false, null);
-                    try { ApkInstaller.install(this, file, (message, ok) -> main.post(() -> toast(message))); }
+                    try { ApkInstaller.install(this, file, (message, ok) -> postUi(() -> toast(message))); }
                     catch (Exception error) { failed(error); }
                 });
-            } catch (Exception error) { main.post(() -> failed(error)); }
+            } catch (Exception error) { postUi(() -> failed(error)); }
         });
     }
 
@@ -595,8 +618,8 @@ public final class MainActivity extends Activity {
                         "; else echo 'No supported module installer found'; exit 1; fi";
                 RootShell.Result result = RootShell.run(command);
                 if (!result.ok()) throw new IllegalStateException(result.output());
-                main.post(() -> { toast(t("核心已更新，重启后生效", "Core updated; reboot to apply")); refresh(); });
-            } catch (Exception error) { main.post(() -> failed(error)); }
+                postUi(() -> { toast(t("核心已更新，重启后生效", "Core updated; reboot to apply")); refresh(); });
+            } catch (Exception error) { postUi(() -> failed(error)); }
         });
     }
 
@@ -605,7 +628,7 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             RootShell.Result result = RootShell.runControl("events");
             String crashes = CrashLog.read(this);
-            main.post(() -> presentRuntimeLog(result, crashes));
+            postUi(() -> presentRuntimeLog(result, crashes));
         });
     }
 
@@ -650,7 +673,7 @@ public final class MainActivity extends Activity {
             RootShell.Result events = RootShell.runControl("events");
             String recent = events.ok() ? recentEventLines(events.output(), 8) : "";
             String crash = CrashLog.latest(this);
-            main.post(() -> launchIssue(recent, crash));
+            postUi(() -> launchIssue(recent, crash));
         });
     }
 
@@ -737,13 +760,22 @@ public final class MainActivity extends Activity {
         busy(true, t("正在清理规则…", "Removing rules…"));
         worker.execute(() -> {
             RootShell.Result result = RootShell.runControl("cleanup-mount");
+            if (!result.ok()) {
+                postUi(() -> {
+                    busy(false, null);
+                    toast(t("无法关闭 hosts 挂载，未删除任何文件：",
+                            "Could not remove the hosts mount; no files were deleted: ") +
+                            result.output());
+                });
+                return;
+            }
             RootShell.Result remove = RootShell.run(
                     "rm -rf /data/adb/weig_rootad /data/adb/weig_rootad-user-backup " +
                     "/data/adb/modules/weig_rootad " +
                     "/data/adb/modules_update/weig_rootad");
-            main.post(() -> {
+            postUi(() -> {
                 busy(false, null);
-                if (!remove.ok()) { toast(result.output() + " " + remove.output()); return; }
+                if (!remove.ok()) { toast(remove.output()); return; }
                 startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + getPackageName())));
             });
         });
@@ -782,6 +814,11 @@ public final class MainActivity extends Activity {
         actionProgress.setVisibility(value ? View.VISIBLE : View.GONE);
         actionText.setVisibility(value && message != null ? View.VISIBLE : View.GONE);
         if (message != null) actionText.setText(message);
+    }
+    private void postUi(Runnable action) {
+        main.post(() -> {
+            if (!destroyed && !isFinishing()) action.run();
+        });
     }
     private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
     private String t(String chinese, String english) { return zh ? chinese : english; }

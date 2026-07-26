@@ -17,14 +17,14 @@ systemless hosts 核心，兼容 Magisk、KernelSU 和 APatch。
 
 ## 安装
 
-普通用户下载正式版 `WeiG-ZeroAd-v0.1.3.zip`，使用 MMRL、Magisk、KernelSU
+普通用户下载正式版 `WeiG-ZeroAd-v0.1.4.zip`，使用 MMRL、Magisk、KernelSU
 或 APatch 安装，然后重启设备。该安装包同时包含核心和管理器。
 
-- `WeiG-ZeroAd-v0.1.3-core-only.zip`：仅核心。
-- `WeiG-ZeroAd-Manager-v0.1.3.apk`：单独安装或更新 APK。
+- `WeiG-ZeroAd-v0.1.4-core-only.zip`：仅核心。
+- `WeiG-ZeroAd-Manager-v0.1.4.apk`：单独安装或更新 APK。
 
-`v0.1.3` 修复主题切换闪退并增加管理器闪退记录，同时包含 `v0.1.2`
-的 APK 安装修复。核心仍为 `0.1.1`，无需因本次修复单独更新核心。
+`v0.1.4` 切换主题时复用现有状态，不再重复读取 Root 核心；规则操作增加
+互斥与失败回滚，下载和规则校验改为流式处理。核心更新为 `0.1.2`。
 
 首次安装核心以及以后更新核心都需要重启。切换过滤模式、更新规则和更新 APK
 不需要重启。
@@ -77,8 +77,8 @@ git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 本地验证与构建：
@@ -88,8 +88,8 @@ python -m rule_tools.build_rules
 python -m unittest discover -s tests -v
 bash tests/runtime_module.sh
 gradle :app:assembleDebug
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.3-core-only.zip
-python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.3.zip \
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.4-core-only.zip
+python -m rule_tools.build_module --output dist/WeiG-ZeroAd-v0.1.4.zip \
   --manager-apk app/build/outputs/apk/debug/app-debug.apk
 ```
 
