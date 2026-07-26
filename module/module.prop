@@ -1,6 +1,6 @@
 id=weig_rootad
 name=WeiG ZeroAd
-version=0.1.2
-versionCode=4
+version=0.1.3
+versionCode=5
 author=Wei.G
 description=Lightweight regional root ad blocking for Magisk, KernelSU and APatch with independently updateable rules.

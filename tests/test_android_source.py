@@ -192,10 +192,10 @@ class AndroidStartupSourceTests(unittest.TestCase):
     def test_manager_and_core_fixes_have_new_update_versions(self) -> None:
         gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
         module = (ROOT / "module/module.prop").read_text(encoding="utf-8")
-        self.assertIn('versionName = "0.1.4"', gradle)
-        self.assertIn("versionCode = 7", gradle)
-        self.assertIn("version=0.1.2", module)
-        self.assertIn("versionCode=4", module)
+        self.assertIn('versionName = "0.1.5"', gradle)
+        self.assertIn("versionCode = 8", gradle)
+        self.assertIn("version=0.1.3", module)
+        self.assertIn("versionCode=5", module)
 
     def test_readme_is_chinese_first_and_hides_git_publish_details(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

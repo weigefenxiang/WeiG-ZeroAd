@@ -1,6 +1,6 @@
 [project]
 name = "weig-zeroad-rule-tools"
-version = "0.1.4"
+version = "0.1.5"
 description = "Reproducible offline rule compiler for Wei.G ZeroAd"
 requires-python = ">=3.10"
 

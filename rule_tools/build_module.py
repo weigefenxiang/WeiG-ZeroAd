@@ -258,7 +258,7 @@ def main() -> None:
     )
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument(
-        "--output", type=Path, default=Path("dist/WeiG-ZeroAd-v0.1.4-core-only.zip")
+        "--output", type=Path, default=Path("dist/WeiG-ZeroAd-v0.1.5-core-only.zip")
     )
     parser.add_argument(
         "--manager-apk", type=Path,

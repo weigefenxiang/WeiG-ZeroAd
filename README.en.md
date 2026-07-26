@@ -19,16 +19,16 @@ APatch.
 
 ## Install
 
-For the official `v0.1.4` release, most users should download
-`WeiG-ZeroAd-v0.1.4.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
+For the official `v0.1.5` release, most users should download
+`WeiG-ZeroAd-v0.1.5.zip` and install it with MMRL, Magisk, KernelSU, or APatch,
 then reboot. The package includes both the core and manager.
 
-- `WeiG-ZeroAd-v0.1.4-core-only.zip`: core only.
-- `WeiG-ZeroAd-Manager-v0.1.4.apk`: standalone APK install or update.
+- `WeiG-ZeroAd-v0.1.5-core-only.zip`: core only.
+- `WeiG-ZeroAd-Manager-v0.1.5.apk`: standalone APK install or update.
 
-`v0.1.4` reuses the current status while switching themes, serializes core
-operations with rollback on rule activation failures, and streams downloads and
-rule validation. The core is updated to `0.1.2`.
+`v0.1.5` reduces I/O and process overhead across the manager, core scripts, and
+rule tools. It also fixes a multiline-argument incompatibility with Android
+toybox awk that could prevent the core from starting. The core is updated to `0.1.3`.
 
 Installing or updating the core requires a reboot. Profile changes, rule
 updates, and APK updates do not.
@@ -73,7 +73,7 @@ GPL-3.0
 <details>
 <summary>Developer: publish from Git</summary>
 
-Pushes to `main` refresh the rolling test release. The `v0.1.4` tag creates the
+Pushes to `main` refresh the rolling test release. The `v0.1.5` tag creates the
 official immutable release.
 
 ```bash
@@ -81,8 +81,8 @@ git add .
 git commit -m "Update Wei.G ZeroAd"
 git push origin main
 
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 Build environment: JDK 17, Gradle 9.6, AGP 9.2, `compileSdk 36`,
